@@ -39,6 +39,9 @@ EMOTIONS = {
     "sleepy": {"open": 0.06, "mouth": 0.0, "zzz": 1.0, "color": (70, 160, 200)},
     "love": {"scale": 1.1, "heart": 1.0, "mouth": 0.8, "mouth_open": 0.2,
              "blush": 1.0, "color": (255, 120, 190)},
+    # 返事を考えているあいだ：目を細めて上を見る
+    "think": {"open": 0.85, "scale": 0.95, "lid_bot": 0.2, "mouth": -0.1,
+              "color": (110, 200, 255)},
 }
 
 EMOTION_NAMES = list(EMOTIONS)
@@ -64,6 +67,7 @@ class Face:
         self.gaze = [0.0, 0.0]
         self.idle_gaze = [0.0, 0.0]
         self.external_gaze = None
+        self.talk = 0.0  # 話しているときの口の開き 0..1
         self.next_saccade = 0.0
         self.next_blink = random.uniform(1.0, 3.0)
         self.blink_start = -1.0
@@ -72,6 +76,9 @@ class Face:
     def set_emotion(self, name):
         if name in EMOTIONS:
             self.emotion = name
+
+    def set_talk(self, level):
+        self.talk = level
 
     def look_at(self, target):
         """target: (x, y) を -1..1 で。None なら自由に視線を泳がせる。"""
@@ -92,6 +99,8 @@ class Face:
             self.next_saccade = self.t + random.uniform(1.2, 3.5)
         if self.emotion == "sleepy":
             goal = (0.0, 0.3)
+        elif self.emotion == "think":
+            goal = (0.45 + 0.1 * math.sin(self.t * 0.8), -0.6)
         elif self.external_gaze is not None:
             goal = self.external_gaze
         else:
@@ -195,7 +204,7 @@ class Face:
         my = S * 0.73 + gy * S * 0.02 + bob
         mw = S * 0.13 * (1 - 0.75 * p["round"])
         curve = p["mouth"] * S * 0.045
-        opening = p["mouth_open"] * S * 0.07
+        opening = (p["mouth_open"] + self.talk * 0.9) * S * 0.07
         n = 16
         upper, lower = [], []
         for i in range(n + 1):

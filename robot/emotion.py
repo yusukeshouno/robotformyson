@@ -26,6 +26,11 @@ class EmotionEngine:
             self.current_until = now
         self.queue.append((emotion, duration))
 
+    def notice(self, now):
+        """声をかけられたなど、人の気配があったとき。眠っていれば起きる。"""
+        self.last_activity = now
+        return self._wake(now)
+
     def _wake(self, now):
         if self.sleeping:
             self.sleeping = False

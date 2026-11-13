@@ -4,7 +4,9 @@
     python3 -m robot.main --fullscreen # Pi のディスプレイで全画面
     python3 -m robot.main --mouse      # カメラなし：マウスを「人の顔」として扱う
 
-キー: 1-7 感情を出す / 0 自動に戻す / c カメラ映像 / d デバッグ表示 / q・Esc 終了
+    python3 -m robot.main --talk       # 会話機能つき（README の準備が必要）
+
+キー: 1-8 感情を出す / 0 自動に戻す / c カメラ映像 / d デバッグ表示 / q・Esc 終了
 画面クリック(タップ)で喜ぶ、連打で怒る、なでる(ドラッグ)と照れる。
 """
 import argparse
@@ -55,9 +57,36 @@ def parse_args(argv=None):
     ap.add_argument("--no-mirror", action="store_true",
                     help="目が人と逆を向くときに指定")
     ap.add_argument("--udp", type=int, default=5005, help="感情タグ受信ポート（0で無効）")
+    ap.add_argument("--talk", action="store_true", help="会話機能を使う")
+    ap.add_argument("--name", default="ピコ", help="ロボットの名前")
+    ap.add_argument("--model", default=None, help="Claude のモデル")
+    ap.add_argument("--vosk-model", default=None, help="音声認識モデルのフォルダ")
+    ap.add_argument("--mic", default=None, help="マイクのデバイス名または番号")
+    ap.add_argument("--voice", default=None, help="Open JTalk の声ファイル (.htsvoice)")
+    ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--run-seconds", type=float, default=0, help=argparse.SUPPRESS)
     return ap.parse_args(argv)
+
+
+def start_conversation(args, tracker, last_face):
+    """会話機能を起動する。準備が足りなければ理由を表示して顔だけで動く。"""
+    try:
+        from . import conversation as cv
+        brain = cv.Brain(args.model or cv.DEFAULT_MODEL, args.name)
+        voice = cv.Voice(args.voice, pitch=args.pitch)
+        mic = int(args.mic) if args.mic and args.mic.isdigit() else args.mic
+        ears = cv.Ears(args.vosk_model or cv.DEFAULT_VOSK, device=mic)
+    except Exception as e:
+        print(f"会話機能を使わずに起動します（{e}）")
+        return None
+    attended = None
+    if tracker:  # カメラがあれば、顔が見えている（10秒以内）ときだけ返事する
+        attended = lambda: time.monotonic() - last_face[0] < 10.0  # noqa: E731
+    conv = cv.Conversation(brain, voice, ears, get_image=tracker.jpeg if tracker else None,
+                           is_attended=attended, wake_words=(args.name,)).start()
+    print("会話機能: 起動しました")
+    return conv
 
 
 def main(argv=None):
@@ -96,7 +125,13 @@ def main(argv=None):
         except OSError as e:
             print(f"UDP {args.udp} を開けませんでした（{e}）")
 
+    last_face = [0.0]
+    conv = None
+    if args.talk:
+        conv = start_conversation(args, tracker, last_face)
+
     show_cam, debug = False, args.debug
+    talk = 0.0
     drag, start = None, time.monotonic()
     clock = pygame.time.Clock()
     running = True
@@ -112,7 +147,7 @@ def main(argv=None):
             elif ev.type == pygame.KEYDOWN:
                 if ev.key in (pygame.K_ESCAPE, pygame.K_q):
                     running = False
-                elif pygame.K_1 <= ev.key <= pygame.K_7:
+                elif pygame.K_1 <= ev.key <= pygame.K_8:
                     engine.express(EMOTION_NAMES[ev.key - pygame.K_1], 4.0, now)
                 elif ev.key == pygame.K_0:
                     engine.express("neutral", 0.0, now)
@@ -141,10 +176,20 @@ def main(argv=None):
             fx = (mx - offset[0]) / S * 2 - 1
             fy = (my - offset[1]) / S * 2 - 1
             present = abs(fx) <= 1 and abs(fy) <= 1
+        if present:
+            last_face[0] = now
         engine.on_face(present, now)
         if listener:
             for emo, dur in listener.poll():
                 engine.express(emo, dur, now)
+        if conv:
+            for emo, dur in conv.poll():
+                if emo == "heard":
+                    engine.notice(now)
+                else:
+                    engine.express(emo, dur, now)
+            talk += (conv.mouth_level() - talk) * 0.6
+            face.set_talk(talk)
 
         emotion = engine.update(now)
         face.set_emotion(emotion)

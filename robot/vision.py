@@ -25,10 +25,12 @@ def _find_cascade():
 
 class FaceTracker:
     def __init__(self, source="auto", index=0, mirror=True, rotate=0,
-                 width=320, height=240):
+                 width=640, height=480, detect_width=320):
         self.source, self.index = source, index
         self.mirror, self.rotate = mirror, rotate
         self.width, self.height = width, height
+        self.detect_width = detect_width
+        self._full = None
         self.backend = None
         self._lock = threading.Lock()
         self._running = False
@@ -82,11 +84,12 @@ class FaceTracker:
                 continue
             if frame.ndim == 3 and frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-            if frame.shape[1] > self.width:
-                scale = self.width / frame.shape[1]
-                frame = cv2.resize(frame, None, fx=scale, fy=scale)
             if rot is not None:
                 frame = cv2.rotate(frame, rot)
+            full = frame
+            if frame.shape[1] > self.detect_width:  # 検出は小さい画像で（速さのため）
+                scale = self.detect_width / frame.shape[1]
+                frame = cv2.resize(frame, None, fx=scale, fy=scale)
             gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
             fh, fw = gray.shape
             faces = self.cascade.detectMultiScale(
@@ -104,7 +107,7 @@ class FaceTracker:
                     self._pos = (nx, ny)
                     self._last_seen = time.monotonic()
             with self._lock:
-                self._frame, self._box = frame, box
+                self._frame, self._box, self._full = frame, box, full
         self._close()
 
     def get(self):
@@ -112,6 +115,15 @@ class FaceTracker:
         with self._lock:
             present = time.monotonic() - self._last_seen < 0.6
             return present, self._pos[0], self._pos[1]
+
+    def jpeg(self, quality=80):
+        """今のカメラ画像を JPEG で返す（会話で「これなに？」と聞かれたとき用）。"""
+        with self._lock:
+            img = self._full
+        if img is None:
+            return None
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return buf.tobytes() if ok else None
 
     def preview(self):
         """デバッグ用のカメラ映像（RGB の numpy 配列）。"""
