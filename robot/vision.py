@@ -1,6 +1,8 @@
 """カメラで顔を見つけ、その位置を -1..1 の座標で返す（別スレッドで動く）。
 
-Pi のカメラモジュールなら picamera2、それ以外（USB カメラ・PC）は OpenCV を使う。
+USB カメラ（Pi なら名前で探す。robot/camera.py）を第一に、なければカメラモジュール
+（picamera2）、それも無ければ PC の 0 番カメラを OpenCV で使う。
+USB を抜いても、さしなおせば自動でつなぎなおす。
 """
 import os
 import threading
@@ -8,10 +10,12 @@ import time
 
 import cv2
 
+from .camera import CameraSettings, find_camera, open_opencv
+
 _CASCADE = "haarcascade_frontalface_default.xml"
 
 
-def _find_cascade():
+def find_cascade():
     dirs = []
     if hasattr(cv2, "data"):
         dirs.append(cv2.data.haarcascades)
@@ -24,21 +28,23 @@ def _find_cascade():
 
 
 class FaceTracker:
-    def __init__(self, source="auto", index=0, mirror=True, rotate=0,
-                 width=640, height=480, detect_width=320):
-        self.source, self.index = source, index
+    def __init__(self, source="auto", settings=None, mirror=True, rotate=0,
+                 detect_width=320):
+        self.source = source
+        self.settings = settings or CameraSettings.load()
         self.mirror, self.rotate = mirror, rotate
-        self.width, self.height = width, height
+        self.width, self.height = self.settings.width, self.settings.height
         self.detect_width = detect_width
         self._full = None
         self.backend = None
+        self.label = ""
         self._lock = threading.Lock()
         self._running = False
         self._pos = (0.0, 0.0)
         self._last_seen = 0.0
         self._frame = None
         self._box = None
-        self.cascade = cv2.CascadeClassifier(_find_cascade())
+        self.cascade = cv2.CascadeClassifier(find_cascade())
 
     def start(self):
         self._read, self._close = self._open()
@@ -50,38 +56,56 @@ class FaceTracker:
         self._running = False
 
     def _open(self):
-        if self.source in ("auto", "picamera"):
+        # 自動のときは、USB カメラがあればそれを先に（カメラモジュールより優先）
+        usb = None
+        if self.source in ("auto", "opencv"):
+            usb = find_camera(self.settings.device)
+        if self.source == "picamera" or (self.source == "auto" and usb is None):
             try:
                 from picamera2 import Picamera2
                 cam = Picamera2()
                 cam.configure(cam.create_preview_configuration(
                     main={"size": (self.width, self.height), "format": "RGB888"}))
                 cam.start()
-                self.backend = "picamera2"
+                self.backend = self.label = "picamera2"
                 return cam.capture_array, cam.stop
             except Exception:
                 if self.source == "picamera":
                     raise
-        cap = cv2.VideoCapture(self.index)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        if not cap.isOpened():
-            raise RuntimeError("カメラを開けませんでした")
+        read, close, self.label = open_opencv(self.settings)
         self.backend = "opencv"
+        return read, close
 
-        def read():
-            ok, frame = cap.read()
-            return frame if ok else None
-        return read, cap.release
+    def _reopen(self):
+        """USB が抜けたあと、さしなおされたらつなぎなおす。"""
+        try:
+            self._close()
+        except Exception:
+            pass
+        try:
+            self._read, self._close = self._open()
+            print(f"カメラにつなぎなおしました: {self.label}")
+            return True
+        except Exception:
+            self._read, self._close = (lambda: None), (lambda: None)
+            return False
 
     def _loop(self):
         rot = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
                270: cv2.ROTATE_90_COUNTERCLOCKWISE}.get(self.rotate)
+        misses, retry_at = 0, 0.0
         while self._running:
             frame = self._read()
             if frame is None:
+                misses += 1
+                now = time.monotonic()
+                if misses > 40 and now >= retry_at:  # 2秒ほど何も来ない＝抜けたかも
+                    if self._reopen():
+                        misses = 0
+                    retry_at = now + 3.0
                 time.sleep(0.05)
                 continue
+            misses = 0
             if frame.ndim == 3 and frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
             if rot is not None:
