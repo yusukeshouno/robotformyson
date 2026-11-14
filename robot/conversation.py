@@ -536,9 +536,10 @@ class Conversation:
     FOLLOW_UP = 15.0  # 返事のあとこの秒数は、顔が見えなくても続けて聞く
 
     def __init__(self, brain, voice=None, ears=None, get_image=None, is_attended=None,
-                 wake_words=(), faces=None, memory=None):
+                 wake_words=(), faces=None, memory=None, language=None):
         self.brain, self.voice, self.ears = brain, voice, ears
         self.memory = memory              # Memory（前に話したことをおぼえる）/ None
+        self.language = language          # Language（話し方に合わせる。数字だけ数える）/ None
         self.get_image = get_image        # () -> JPEG bytes / None
         self.is_attended = is_attended    # () -> 人がこちらを見ているか
         self.wake_words = tuple(wake_words)
@@ -593,6 +594,8 @@ class Conversation:
         print(f"[{emotion}] {answer}")
         if self.memory:
             self.memory.add_turn(text, answer)
+        if self.language:
+            self.language.on_turn(text, answer)
         self.events.put((emotion, 60))
         self._speak(answer)
         self.events.put((emotion, 1.5))

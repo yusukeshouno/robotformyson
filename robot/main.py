@@ -19,6 +19,7 @@ from .audio import add_audio_args
 from .emotion import EmotionEngine
 from .growth import Growth
 from .memory import Memory
+from .language import Language
 from . import personality
 from .face import BG, EMOTION_NAMES, Face
 
@@ -79,6 +80,8 @@ def parse_args(argv=None):
     ap.add_argument("--no-growth", action="store_true", help="成長の記録をしない")
     ap.add_argument("--personality", choices=personality.MODES, default="curious",
                     help="curious=好奇心いっぱいの年下の友達 / plain=前と同じ / weekly=週ごとに入れかえて比べる")
+    ap.add_argument("--no-language", action="store_true",
+                    help="話し方に合わせて言葉を変えない（話した長さも数えない）")
     ap.add_argument("--no-memory", action="store_true",
                     help="前に話したことをおぼえない（小さい子には無い方が楽しいこともある）")
     ap.add_argument("--debug", action="store_true")
@@ -107,7 +110,8 @@ def start_faces(args, tracker):
     return faces, Greeter(faces)
 
 
-def start_conversation(args, tracker, last_face, growth=None, faces=None, memory=None):
+def start_conversation(args, tracker, last_face, growth=None, faces=None, memory=None,
+                       language=None):
     """会話機能を起動する。準備が足りなければ理由を表示して顔だけで動く。"""
     try:
         from . import conversation as cv
@@ -118,6 +122,8 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
         if growth:  # なかよしになるほど話し方が変わる
             hints.append(growth.prompt_hint)
             brain.speaker_in_system = True
+        if language:  # 話し方のむずかしさ・今週のことば
+            hints.append(language.prompt_hint)
         if memory:  # 前に話したこと。まとめは家の中の Ollama だけ（Claude には送らない）
             hints.append(memory.prompt_hint)
             memory.summarize = getattr(brain, "summarize", None)
@@ -136,7 +142,7 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
         attended = lambda: time.monotonic() - last_face[0] < 10.0  # noqa: E731
     conv = cv.Conversation(brain, voice, ears, get_image=tracker.jpeg if tracker else None,
                            is_attended=attended, wake_words=(args.name,),
-                           faces=faces, memory=memory).start()
+                           faces=faces, memory=memory, language=language).start()
     print("会話機能: 起動しました")
     return conv
 
@@ -181,12 +187,16 @@ def main(argv=None):
 
     growth = None if args.no_growth else Growth()
     memory = None if (args.no_memory or not args.talk or not faces) else Memory(robot=args.name)
+    language = None if (args.no_language or not args.talk) else Language()
     if faces:  # 見分けた人ごとに、なかよし度と記憶を切りかえる
         def call_name(pid, name):
             return (faces.person(pid) or {}).get("call") or name if pid else None
         if growth:
             growth.greet_on_switch = greeter is None  # あいさつは顔をおぼえる機能にまかせる
             faces.on_change(lambda pid, name: growth.set_person(pid, call_name(pid, name)))
+        if language:
+            faces.on_change(lambda pid, name: language.set_person(pid, call_name(pid, name)))
+            language.set_person(*faces.current())
         if memory:
             faces.on_change(lambda pid, name: memory.set_person(pid, call_name(pid, name)))
             memory.set_person(*faces.current())
@@ -195,7 +205,7 @@ def main(argv=None):
     last_face = [0.0]
     conv = None
     if args.talk:
-        conv = start_conversation(args, tracker, last_face, growth, faces, memory)
+        conv = start_conversation(args, tracker, last_face, growth, faces, memory, language)
 
     def react(reactions):  # 成長からの反応を顔と声に出す
         for i, (emo, dur, text) in enumerate(reactions):
