@@ -17,6 +17,7 @@ class EmotionEngine:
         self.last_love = now
         self.sleeping = False
         self.taps = deque()
+        self.last_seen = now        # 最後に顔が見えていた時刻
 
     # ---- 外部から ----
     def express(self, emotion, duration, now, interrupt=True):
@@ -41,15 +42,18 @@ class EmotionEngine:
 
     # ---- 入力イベント ----
     def on_face(self, present, now):
+        away = now - self.last_seen      # 顔が見えなくなってからの時間
         if present:
             self.last_activity = now
+            self.last_seen = now
         if present == self.present:
             return
         self.present = present
         if present:
             self.present_since = now
             if not self._wake(now):
-                self.express("joy", 2.0, now)
+                # しばらくぶりに会えたら、目がきらきら
+                self.express("excited" if away > 60.0 else "joy", 2.0, now)
         elif now - self.present_since > 3.0:
             self.express("sad", 2.0, now)
 
@@ -58,18 +62,24 @@ class EmotionEngine:
         if self._wake(now):
             return
         self.taps.append(now)
-        while self.taps and now - self.taps[0] > 2.0:
+        while self.taps and now - self.taps[0] > 5.0:
             self.taps.popleft()
-        if len(self.taps) >= 5:          # 連打されると怒る
+        recent = sum(1 for t in self.taps if now - t <= 2.0)
+        if len(self.taps) >= 10:         # それでも連打されると目が回る
             self.taps.clear()
+            self.express("dizzy", 3.0, now)
+        elif recent >= 5:                # 連打されると怒る
             self.express("angry", 2.5, now)
+        elif recent == 3:                # 3回目はくすぐったくて笑う
+            self.express("laugh", 1.5, now)
         else:
             self.express("joy", 1.5, now)
 
-    def on_stroke(self, now):            # なでられると照れる
+    def on_stroke(self, now):            # なでられると照れて、それから大好き
         self.last_activity = now
         if not self._wake(now):
-            self.express("love", 3.0, now)
+            self.express("shy", 1.5, now)
+            self.express("love", 2.5, now, interrupt=False)
 
     # ---- 毎フレーム ----
     def update(self, now):
@@ -85,7 +95,7 @@ class EmotionEngine:
         if self.present:
             if now - self.last_love > self.LOVE_EVERY and now - self.present_since > 10:
                 self.last_love = now
-                self.express(random.choice(["love", "joy"]), 2.5, now)
+                self.express(random.choice(["love", "joy", "wink", "laugh"]), 2.5, now)
             return "neutral"
         if now - self.last_activity > self.SLEEP_AFTER:
             self.sleeping = True
