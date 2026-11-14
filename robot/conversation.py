@@ -29,6 +29,7 @@ import numpy as np
 
 from .audio import (AudioSettings, MicGate, add_audio_args, output_channels, resolve_device,
                     to_channels)
+from .memory import wants_forget
 
 DEFAULT_MODEL = "claude-opus-5-5"            # Claude を使うとき
 OLLAMA_URL = "http://localhost:11434"
@@ -256,6 +257,15 @@ class OllamaBrain(_BrainBase):
     @property
     def vision(self):
         return bool(self._caps) and "vision" in self._caps
+
+    def summarize(self, prompt):
+        """記憶のまとめ用。会話の履歴は使わず、1回だけ聞く。家の中の Ollama にだけ送る。"""
+        body = {"model": self.model, "stream": False, "options": {"temperature": 0.2},
+                "messages": [{"role": "user", "content": prompt}]}
+        if self._caps and "thinking" in self._caps:
+            body["think"] = False
+        resp = self._post("/api/chat", body, self.timeout)
+        return _THINK_RE.sub("", resp.get("message", {}).get("content", ""))
 
     def _post(self, path, body, timeout):
         req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(),
@@ -526,11 +536,18 @@ class Conversation:
     FOLLOW_UP = 15.0  # 返事のあとこの秒数は、顔が見えなくても続けて聞く
 
     def __init__(self, brain, voice=None, ears=None, get_image=None, is_attended=None,
-                 wake_words=()):
+                 wake_words=(), faces=None, memory=None, language=None):
         self.brain, self.voice, self.ears = brain, voice, ears
+        self.memory = memory              # Memory（前に話したことをおぼえる）/ None
+        self.language = language          # Language（話し方に合わせる。数字だけ数える）/ None
         self.get_image = get_image        # () -> JPEG bytes / None
         self.is_attended = is_attended    # () -> 人がこちらを見ているか
         self.wake_words = tuple(wake_words)
+        self.faces = faces                # FaceRecognizer（顔をおぼえる機能）/ None
+        self.enroll = None
+        if faces is not None:
+            from .faces import EnrollDialog
+            self.enroll = EnrollDialog(faces)
         self.events = queue.Queue()
         self.last_reply = 0.0
         self._speak_lock = threading.Lock()
@@ -547,6 +564,8 @@ class Conversation:
                 print(f"[会話] エラー: {e}")
 
     def should_reply(self, text):
+        if self.enroll and self.enroll.active:  # 顔の登録の途中（「うん」も聞く）
+            return True
         if len(text) < 2:
             return False
         if contains_any(text, self.wake_words):
@@ -561,12 +580,22 @@ class Conversation:
             return None
         print(f"[聞こえた] {text}")
         self.events.put(("heard", 0))
+        if self.enroll and self.enroll.handle(text, self._answer):
+            return None
+        if self.memory and wants_forget(text):  # 「いまの わすれて」：この会話はおぼえない
+            self.memory.drop_session()
+            self._answer("neutral", "わかった。いまの おはなしは わすれるね。")
+            return None
         self.events.put(("think", 60))
         image = None
         if self.get_image and wants_look(text) and self.brain.vision:
             image = self.get_image()
-        emotion, answer = self.brain.reply(text, image)
+        emotion, answer = self.brain.reply(self._with_speaker(text), image)
         print(f"[{emotion}] {answer}")
+        if self.memory:
+            self.memory.add_turn(text, answer)
+        if self.language:
+            self.language.on_turn(text, answer)
         self.events.put((emotion, 60))
         self._speak(answer)
         self.events.put((emotion, 1.5))
@@ -590,6 +619,29 @@ class Conversation:
         """自分から話す（あいさつ・レベルアップなど）。裏で話すのですぐ戻る。"""
         print(f"[ひとりごと] {text}")
         threading.Thread(target=self._speak, args=(text,), daemon=True).start()
+
+    def _answer(self, emotion, text):
+        """表情を出しながら話し、話し終わるまで待つ（顔の登録のやりとりで使う）。"""
+        print(f"[{emotion}] {text}")
+        self.events.put((emotion, 60))
+        self._speak(text)
+        self.events.put((emotion, 1.5))
+        self.last_reply = time.monotonic()
+
+    def who(self):
+        """いま話している（見えている）人の呼び名。わからなければ None。"""
+        if not self.faces:
+            return None
+        pid, name = self.faces.current()
+        if pid is None:
+            return None
+        return (self.faces.person(pid) or {}).get("call") or name
+
+    def _with_speaker(self, text):
+        if getattr(self.brain, "speaker_in_system", False):  # 成長の記録が相手の名前を指示に入れている
+            return text
+        call = self.who()
+        return f"{text}（話しているのは {call}）" if call else text
 
     def poll(self):
         out = []

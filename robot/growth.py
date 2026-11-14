@@ -88,6 +88,7 @@ class Growth:
         self.present = False
         self._face_carry = 0.0
         self._pending = None   # 別スレッドから届いた「誰か」
+        self.greet_on_switch = True  # 人が入れかわったとき、ここで あいさつの言葉を出すか
         self._dirty = False
         self._saved_at = clock()
         self.load()
@@ -138,8 +139,13 @@ class Growth:
         if pid == self.person:
             return []
         self.person = pid
-        # 人が入れかわったら、その人へのあいさつ
-        return self._greet(p) if self.present else []
+        # 人が入れかわったら、その人へのあいさつ（ほかの機能があいさつするなら言葉は出さない）
+        if not self.present:
+            return []
+        out = self._greet(p)
+        if not self.greet_on_switch:  # 表情とポイントだけ。言葉は顔をおぼえる機能のあいさつにまかせる
+            out = [(emo, dur, None) for emo, dur, _ in out]
+        return out
 
     def _get(self, pid, name=None):
         people = self.data["people"]

@@ -1,4 +1,5 @@
 """感情エンジン：顔の検出・タッチ・外部からの指示を受けて、今の感情を決める。"""
+import math
 import random
 from collections import deque
 
@@ -6,6 +7,12 @@ from collections import deque
 class EmotionEngine:
     SLEEP_AFTER = 40.0   # 誰もいない状態がこの秒数続くと眠る
     LOVE_EVERY = 20.0    # 見つめられ続けると時々ハート目
+    # 返事の気持ちの「余韻」。話し終えたあとも少しのあいだ顔に残り、ゆっくり消える。
+    # 悲しい・怒りは子どもを引き止めないよう、短く・弱く残す。
+    MOOD_WEIGHT = 0.45
+    MOOD_FADE = {"sad": 4.0, "cry": 4.0, "angry": 3.0}  # 秒（この時間で約 1/3 になる）
+    MOOD_FADE_DEFAULT = 15.0
+    NO_MOOD = ("neutral", "think", "sleepy", "dizzy")
 
     def __init__(self, now):
         self.queue = deque()        # (感情, 秒数) の予約
@@ -17,6 +24,7 @@ class EmotionEngine:
         self.last_love = now
         self.sleeping = False
         self.taps = deque()
+        self.mood_name, self.mood_since = "neutral", now
         self.last_seen = now        # 最後に顔が見えていた時刻
 
     # ---- 外部から ----
@@ -26,6 +34,22 @@ class EmotionEngine:
             self.queue.clear()
             self.current_until = now
         self.queue.append((emotion, duration))
+
+    def set_mood(self, emotion, now):
+        """会話の返事の気持ちを余韻として残す。"""
+        if emotion not in self.NO_MOOD:
+            self.mood_name, self.mood_since = emotion, now
+
+    def mood(self, now):
+        """(余韻の感情, 強さ 0..MOOD_WEIGHT)。眠っているときや何か表情を出しているときは 0。"""
+        if self.mood_name == "neutral" or self.sleeping:
+            return "neutral", 0.0
+        fade = self.MOOD_FADE.get(self.mood_name, self.MOOD_FADE_DEFAULT)
+        w = self.MOOD_WEIGHT * math.exp(-(now - self.mood_since) / fade)
+        if w < 0.03:
+            self.mood_name = "neutral"
+            return "neutral", 0.0
+        return self.mood_name, w
 
     def notice(self, now):
         """声をかけられたなど、人の気配があったとき。眠っていれば起きる。"""

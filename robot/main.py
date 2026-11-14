@@ -18,6 +18,9 @@ import pygame
 from .audio import add_audio_args
 from .emotion import EmotionEngine
 from .growth import Growth
+from .memory import Memory
+from .language import Language
+from . import personality
 from .face import BG, EMOTION_NAMES, Face
 
 
@@ -62,6 +65,8 @@ def parse_args(argv=None):
                     help="目が人と逆を向くときに指定")
     ap.add_argument("--udp", type=int, default=5005, help="感情タグ受信ポート（0で無効）")
     ap.add_argument("--talk", action="store_true", help="会話機能を使う")
+    ap.add_argument("--no-faces", action="store_true",
+                    help="家族の顔を見分ける機能を使わない")
     ap.add_argument("--name", default="ピコ", help="ロボットの名前")
     ap.add_argument("--brain", choices=["ollama", "claude", "simple"], default="ollama",
                     help="考える部分: ollama（無料・Mac など）/ claude（有料）/ simple（決まった受け答えだけ）")
@@ -73,6 +78,12 @@ def parse_args(argv=None):
     ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
     add_audio_args(ap)
     ap.add_argument("--no-growth", action="store_true", help="成長の記録をしない")
+    ap.add_argument("--personality", choices=personality.MODES, default="curious",
+                    help="curious=好奇心いっぱいの年下の友達 / plain=前と同じ / weekly=週ごとに入れかえて比べる")
+    ap.add_argument("--no-language", action="store_true",
+                    help="話し方に合わせて言葉を変えない（話した長さも数えない）")
+    ap.add_argument("--no-memory", action="store_true",
+                    help="前に話したことをおぼえない（小さい子には無い方が楽しいこともある）")
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--run-seconds", type=float, default=0, help=argparse.SUPPRESS)
     return ap.parse_args(argv)
@@ -85,13 +96,39 @@ def screen_to_face(x, y, rotate):
     return x, y
 
 
-def start_conversation(args, tracker, last_face, growth=None):
+def start_faces(args, tracker):
+    """家族の顔を見分ける機能を起動する。モデルがなければ使わずに動く。"""
+    if not tracker or args.no_faces:
+        return None, None
+    try:
+        from .faces import Embedder, FaceDB, FaceRecognizer, Greeter
+        faces = FaceRecognizer(FaceDB(), Embedder()).start(tracker.latest)
+    except Exception as e:
+        print(f"顔を見分ける機能を使わずに起動します（{e}）")
+        return None, None
+    print(f"顔をおぼえる: {len(faces.db.people)}人 登録ずみ")
+    return faces, Greeter(faces)
+
+
+def start_conversation(args, tracker, last_face, growth=None, faces=None, memory=None,
+                       language=None):
     """会話機能を起動する。準備が足りなければ理由を表示して顔だけで動く。"""
     try:
         from . import conversation as cv
         brain = cv.make_brain(args.brain, args.model, args.name, args.ollama_url)
+        hints = [lambda: personality.hint(args.personality)]  # 好奇心・まちがえても大丈夫
+        print(f"性格: {'好奇心いっぱい' if personality.is_curious(args.personality) else 'ふつう'}"
+              f"（--personality {args.personality}）")
         if growth:  # なかよしになるほど話し方が変わる
-            brain.extra_system = growth.prompt_hint
+            hints.append(growth.prompt_hint)
+            brain.speaker_in_system = True
+        if language:  # 話し方のむずかしさ・今週のことば
+            hints.append(language.prompt_hint)
+        if memory:  # 前に話したこと。まとめは家の中の Ollama だけ（Claude には送らない）
+            hints.append(memory.prompt_hint)
+            memory.summarize = getattr(brain, "summarize", None)
+        if hasattr(brain, "extra_system"):
+            brain.extra_system = lambda: "\n".join(h for h in (f() for f in hints) if h)
         audio = cv.AudioSettings.load(args.mic, args.speaker, args.echo_tail)
         mic, speaker = audio.resolve()
         voice = cv.Voice(args.voice, pitch=args.pitch, device=speaker)
@@ -104,7 +141,8 @@ def start_conversation(args, tracker, last_face, growth=None):
     if tracker:  # カメラがあれば、顔が見えている（10秒以内）ときだけ返事する
         attended = lambda: time.monotonic() - last_face[0] < 10.0  # noqa: E731
     conv = cv.Conversation(brain, voice, ears, get_image=tracker.jpeg if tracker else None,
-                           is_attended=attended, wake_words=(args.name,)).start()
+                           is_attended=attended, wake_words=(args.name,),
+                           faces=faces, memory=memory, language=language).start()
     print("会話機能: 起動しました")
     return conv
 
@@ -138,6 +176,8 @@ def main(argv=None):
         except Exception as e:  # カメラがなくても顔だけは動かす
             print(f"カメラを使わずに起動します（{e}）")
 
+    faces, greeter = start_faces(args, tracker)
+
     listener = None
     if args.udp:
         try:
@@ -146,12 +186,26 @@ def main(argv=None):
             print(f"UDP {args.udp} を開けませんでした（{e}）")
 
     growth = None if args.no_growth else Growth()
-    # 顔をおぼえる機能とは faces.on_change(growth.set_person) でつなぐ
+    memory = None if (args.no_memory or not args.talk or not faces) else Memory(robot=args.name)
+    language = None if (args.no_language or not args.talk) else Language()
+    if faces:  # 見分けた人ごとに、なかよし度と記憶を切りかえる
+        def call_name(pid, name):
+            return (faces.person(pid) or {}).get("call") or name if pid else None
+        if growth:
+            growth.greet_on_switch = greeter is None  # あいさつは顔をおぼえる機能にまかせる
+            faces.on_change(lambda pid, name: growth.set_person(pid, call_name(pid, name)))
+        if language:
+            faces.on_change(lambda pid, name: language.set_person(pid, call_name(pid, name)))
+            language.set_person(*faces.current())
+        if memory:
+            faces.on_change(lambda pid, name: memory.set_person(pid, call_name(pid, name)))
+            memory.set_person(*faces.current())
+            memory.start()
 
     last_face = [0.0]
     conv = None
     if args.talk:
-        conv = start_conversation(args, tracker, last_face, growth)
+        conv = start_conversation(args, tracker, last_face, growth, faces, memory, language)
 
     def react(reactions):  # 成長からの反応を顔と声に出す
         for i, (emo, dur, text) in enumerate(reactions):
@@ -222,6 +276,13 @@ def main(argv=None):
         if listener:
             for emo, dur in listener.poll():
                 engine.express(emo, dur, now)
+        if greeter:  # 家族が来たら、名前を呼んであいさつ
+            for emo, text in greeter.poll():
+                engine.express(emo if emo in EMOTION_NAMES else "joy", 3.0, now)
+                if conv:
+                    conv.say(text)
+                else:
+                    print(f"[あいさつ] {text}")
         if conv:
             for emo, dur in conv.poll():
                 if emo == "heard":
@@ -230,11 +291,13 @@ def main(argv=None):
                         react(growth.on_talk())
                 else:
                     engine.express(emo, dur, now)
+                    engine.set_mood(emo, now)
             talk += (conv.mouth_level() - talk) * 0.6
             face.set_talk(talk)
 
         emotion = engine.update(now)
         face.set_emotion(emotion)
+        face.set_mood(*engine.mood(now))
         face.look_at((max(-1, min(1, fx)), max(-1, min(1, fy))) if present else None)
         face.update(dt)
         face.draw(canvas)
@@ -250,6 +313,8 @@ def main(argv=None):
             label = f"{emotion}  face={'yes' if present else 'no'}  {clock.get_fps():.0f}fps"
             if growth:
                 label += f"  Lv{growth.level} {growth.current['points']}pt"
+            if faces:
+                label += f"  who={faces.current()[0] or '-'}"  # 日本語は既定のフォントで出ないので id
             canvas.blit(font.render(label, True, (200, 200, 200)), (8, S - font.get_height() - 8))
 
         screen.fill(BG)
@@ -257,6 +322,13 @@ def main(argv=None):
                     if args.screen_rotate else canvas, offset)
         pygame.display.flip()
 
+    if memory:
+        try:
+            memory.stop()
+        except OSError as e:
+            print(f"記憶を保存できませんでした（{e}）")
+    if faces:
+        faces.stop()
     if tracker:
         tracker.stop()
     if growth:

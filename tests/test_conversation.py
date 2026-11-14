@@ -288,3 +288,37 @@ def test_text_mode_main(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[joy] おはよう！ きょうも げんきだね。" in out
     assert "無視" not in out   # 空の行は黙って読みとばす
+
+
+def test_curious_personality_hint():
+    import datetime as dt
+    from robot import personality
+    assert "年下の友達" in personality.hint("curious")
+    assert personality.hint("plain") == ""
+    even = dt.date(2026, 11, 9)   # ISO 第46週
+    odd = dt.date(2026, 11, 16)   # ISO 第47週
+    assert personality.is_curious("weekly", even)
+    assert not personality.is_curious("weekly", odd)
+    # 本当のことは、わざとまちがえない
+    assert "わざとまちがえない" in personality.CURIOUS_STYLE
+
+
+def test_speaker_name_kept_when_only_personality_in_system():
+    from robot.conversation import Conversation, SimpleBrain
+
+    class Faces:
+        def current(self):
+            return "p1", "ゆうと"
+
+        def person(self, pid):
+            return {"call": "ゆうくん"}
+
+        def on_change(self, cb):
+            pass
+    brain = SimpleBrain("ピコ")
+    brain.extra_system = lambda: "性格"
+    conv = Conversation(brain)
+    conv.faces = Faces()
+    assert "ゆうくん" in conv._with_speaker("こんにちは")
+    brain.speaker_in_system = True
+    assert conv._with_speaker("こんにちは") == "こんにちは"
