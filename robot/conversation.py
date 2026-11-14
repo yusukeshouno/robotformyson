@@ -34,13 +34,14 @@ DEFAULT_MODEL = "claude-opus-5-5"            # Claude を使うとき
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "gemma4:12b"                   # Mac mini など（画像も見られる）
 DEFAULT_VOSK = os.path.join(os.path.dirname(__file__), "..", "models", "vosk-model-small-ja-0.22")
-REPLY_EMOTIONS = ("neutral", "joy", "sad", "angry", "surprise", "love")
+REPLY_EMOTIONS = ("neutral", "joy", "sad", "angry", "surprise", "love",
+                  "laugh", "shy", "excited", "confused")
 
 SYSTEM_PROMPT = """あなたは「{name}」という名前の、机の上にいる小さなロボットです。小さな子どもとおしゃべりします。
 
 - 返事は短く、1〜2文（40文字くらいまで）。声に出して読み上げるので、記号・絵文字・箇条書き・英字は使わないでください。
 - やさしく明るい話し言葉で。むずかしい言葉は、子どもにわかる言葉に言いかえてください。
-- 返事の先頭に、今の気持ちを [neutral] [joy] [sad] [angry] [surprise] [love] のどれか1つで付けてください。angry はふざけて怒ってみせるときだけ使います。
+- 返事の先頭に、今の気持ちを [neutral] [joy] [sad] [angry] [surprise] [love] [laugh] [shy] [excited] [confused] のどれか1つで付けてください。laugh はおもしろいとき、shy はほめられて照れるとき、excited はわくわくするとき、confused はよくわからないときです。angry はふざけて怒ってみせるときだけ使います。
 - 画像が付いているときは、あなたの目（カメラ）に今うつっているものです。
 - 火・刃物・薬・高いところ・知らない人について行くなど、危ないことは「おうちの人に聞いてね」と伝えてください。こわい話や大人向けの話はしません。
 - 住所や学校の名前などの個人情報は聞かないでください。言われても、くり返したり覚えたりしないでください。
@@ -141,6 +142,7 @@ class _BrainBase:
 
     def __init__(self, name, max_turns):
         self.system = SYSTEM_PROMPT.format(name=name)
+        self.extra_system = None  # () -> 指示に足す文（成長のレベルや相手の名前など）
         self.max_turns = max_turns
         self.history = []
         self.fallback = None  # つながらないときに代わりに答える頭脳（SimpleBrain）
@@ -166,6 +168,10 @@ class _BrainBase:
                          {"role": "assistant", "content": f"[{emotion}] {answer}"}]
         self.history = self.history[-2 * self.max_turns:]
         return emotion, answer
+
+    def system_prompt(self):
+        extra = self.extra_system() if self.extra_system else ""
+        return self.system + ("\n" + extra if extra else "")
 
     def _ask(self, text, image_jpeg):
         raise NotImplementedError
@@ -195,7 +201,7 @@ class ClaudeBrain(_BrainBase):
             resp = self.client.beta.messages.create(
                 model=self.model,
                 max_tokens=4000,
-                system=self.system,
+                system=self.system_prompt(),
                 messages=self.history + [{"role": "user", "content": content}],
                 output_config={"effort": self.effort},
                 # 安全上の理由で断られたとき、サーバー側で別モデルに自動で切り替える
@@ -277,7 +283,7 @@ class OllamaBrain(_BrainBase):
             user["images"] = [base64.standard_b64encode(image_jpeg).decode()]
         body = {
             "model": self.model,
-            "messages": [{"role": "system", "content": self.system}] + self.history + [user],
+            "messages": [{"role": "system", "content": self.system_prompt()}] + self.history + [user],
             "stream": False,
             "keep_alive": "30m",  # モデルを読みこんだままにして、次の返事を速くする
             # 短い会話なので記憶する長さ(num_ctx)を絞ってメモリを節約する
