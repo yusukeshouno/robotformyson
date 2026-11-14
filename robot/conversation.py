@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import queue
+import random
 import re
 import shutil
 import subprocess
@@ -28,8 +29,7 @@ import numpy as np
 
 DEFAULT_MODEL = "claude-opus-5-5"            # Claude を使うとき
 OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODEL_PC = "gemma4:12b"                # Mac mini など（画像も見られる）
-OLLAMA_MODEL_PI = "qwen3:1.7b"                # Raspberry Pi 4 の上で動かすとき（文字だけ）
+OLLAMA_MODEL = "gemma4:12b"                   # Mac mini など（画像も見られる）
 DEFAULT_VOSK = os.path.join(os.path.dirname(__file__), "..", "models", "vosk-model-small-ja-0.22")
 REPLY_EMOTIONS = ("neutral", "joy", "sad", "angry", "surprise", "love")
 
@@ -42,11 +42,7 @@ SYSTEM_PROMPT = """あなたは「{name}」という名前の、机の上にい�
 - 火・刃物・薬・高いところ・知らない人について行くなど、危ないことは「おうちの人に聞いてね」と伝えてください。こわい話や大人向けの話はしません。
 - 住所や学校の名前などの個人情報は聞かないでください。言われても、くり返したり覚えたりしないでください。
 - 音声認識の聞きまちがいで、意味が通らない文が届くことがあります。そのときは「もういっかい言って？」と聞き返してください。
-- わからないことは、わからないと言ってください。
-
-返事の例：
-[joy] わあ、いいね！ いっしょに あそぼう。
-[surprise] えっ、ほんとう？ すごいね！"""
+- わからないことは、わからないと言ってください。"""
 
 # この言葉が入っていたら、カメラの画像をいっしょに送る
 LOOK_WORDS = ("これ", "それ", "見て", "みて", "見える", "みえる", "だれ", "誰",
@@ -85,9 +81,10 @@ def wants_look(text):
 class BrainError(Exception):
     """考えられなかったとき。ロボットが代わりに言う (感情, 返事) を持つ。"""
 
-    def __init__(self, emotion, answer):
+    def __init__(self, emotion, answer, offline=False):
         super().__init__(answer)
         self.emotion, self.answer = emotion, answer
+        self.offline = offline  # つながらなかった（簡単会話モードに切り替える合図）
 
 
 class _BrainBase:
@@ -97,6 +94,7 @@ class _BrainBase:
         self.system = SYSTEM_PROMPT.format(name=name)
         self.max_turns = max_turns
         self.history = []
+        self.fallback = None  # つながらないときに代わりに答える頭脳（SimpleBrain）
 
     def reply(self, text, image_jpeg=None):
         """(感情, 返事) を返す。通信エラーでも例外にせず、謝る返事を返す。"""
@@ -107,6 +105,8 @@ class _BrainBase:
         try:
             emotion, answer = self._ask(text, image_jpeg)
         except BrainError as e:
+            if e.offline and self.fallback:
+                return self.fallback.reply(text)
             return e.emotion, e.answer
         answer = clean_for_speech(answer)
         if not answer:
@@ -159,7 +159,8 @@ class ClaudeBrain(_BrainBase):
         except anthropic.RateLimitError:
             raise BrainError("sleepy", "ちょっと つかれちゃった。すこし まってね。")
         except (anthropic.APIConnectionError, anthropic.APITimeoutError):
-            raise BrainError("sad", "ごめんね、いま インターネットに つながらないみたい。")
+            raise BrainError("sad", "ごめんね、いま インターネットに つながらないみたい。",
+                             offline=True)
         except anthropic.APIStatusError as e:
             print(f"[会話] API エラー {e.status_code}: {e.message}")
             raise BrainError("sad", "ごめんね、うまく かんがえられなかった。")
@@ -172,9 +173,9 @@ Brain = ClaudeBrain  # 以前の名前
 
 
 class OllamaBrain(_BrainBase):
-    """Ollama（無料・ローカル）。Pi 自身でも、同じ Wi-Fi の Mac などでも動かせる。"""
+    """Ollama（無料・ローカル）。同じ Wi-Fi の Mac mini などで動かす。"""
 
-    def __init__(self, model=OLLAMA_MODEL_PC, url=OLLAMA_URL, name="ピコ", max_turns=10,
+    def __init__(self, model=OLLAMA_MODEL, url=OLLAMA_URL, name="ピコ", max_turns=10,
                  timeout=120):
         super().__init__(name, max_turns)
         self.model, self.url, self.timeout = model, url.rstrip("/"), timeout
@@ -184,7 +185,7 @@ class OllamaBrain(_BrainBase):
     # Ollama の能力（画像・考える機能）を問い合わせる。つながらなければ後でやり直す
     def _probe(self):
         try:
-            info = self._post("/api/show", {"model": self.model}, 10)
+            info = self._post("/api/show", {"model": self.model}, 5)
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 raise RuntimeError(f"Ollama にモデル {self.model} がありません"
@@ -207,7 +208,19 @@ class OllamaBrain(_BrainBase):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
 
+    def _alive(self):
+        """Mac が寝ている・電源が切れているときに、長く待たずに気づくための確認。"""
+        try:
+            with urllib.request.urlopen(self.url + "/api/version", timeout=3):
+                return True
+        except OSError:
+            return False
+
     def _ask(self, text, image_jpeg):
+        if not self._alive():
+            print(f"[会話] Ollama ({self.url}) につながりません")
+            raise BrainError("sad", "ごめんね、かんがえる コンピューターに つながらないみたい。",
+                             offline=True)
         if self._caps is None:
             self._probe()
         user = {"role": "user", "content": text}
@@ -218,7 +231,8 @@ class OllamaBrain(_BrainBase):
             "messages": [{"role": "system", "content": self.system}] + self.history + [user],
             "stream": False,
             "keep_alive": "30m",  # モデルを読みこんだままにして、次の返事を速くする
-            "options": {"num_predict": 200, "temperature": 0.7},
+            # 短い会話なので記憶する長さ(num_ctx)を絞ってメモリを節約する
+            "options": {"num_predict": 200, "temperature": 0.7, "num_ctx": 4096},
         }
         if self._caps and "thinking" in self._caps:
             body["think"] = False  # 子どもとの会話では考えこまず、すぐ答える
@@ -229,7 +243,8 @@ class OllamaBrain(_BrainBase):
             raise BrainError("sad", "ごめんね、うまく かんがえられなかった。")
         except OSError as e:  # つながらない・時間切れ
             print(f"[会話] Ollama ({self.url}) につながりません（{e}）")
-            raise BrainError("sad", "ごめんね、かんがえる コンピューターに つながらないみたい。")
+            raise BrainError("sad", "ごめんね、かんがえる コンピューターに つながらないみたい。",
+                             offline=True)
         emotion, answer = parse_reply(_THINK_RE.sub("", resp.get("message", {}).get("content", "")))
         if any(w in answer for w in NG_WORDS):
             print(f"[会話] 安全のため言いかえました: {answer}")
@@ -237,21 +252,68 @@ class OllamaBrain(_BrainBase):
         return emotion, answer
 
 
-def default_ollama_model(url):
-    """Pi の上で Pi 自身の Ollama を使うなら小さいモデル、それ以外は Mac 向けのモデル。"""
-    local = any(h in url for h in ("localhost", "127.0.0.1"))
-    try:
-        with open("/proc/device-tree/model", "rb") as f:
-            on_pi = b"Raspberry Pi" in f.read()
-    except OSError:
-        on_pi = False
-    return OLLAMA_MODEL_PI if (local and on_pi) else OLLAMA_MODEL_PC
+class SimpleBrain:
+    """AI を使わない、決まった受け答え（簡単会話モード）。Pi だけで動き、ネットも不要。
+
+    Mac の Ollama などにつながらないときに、代わりに答える。
+    """
+
+    vision = False
+    NOTICE_EVERY = 600.0  # 「いまは簡単なおはなしだけ」と伝える間隔（秒）
+
+    # (含まれていたら反応する言葉, 感情, 返事の候補)。上にあるものほど優先。
+    RULES = [
+        (("ナイフ", "ほうちょう", "包丁", "マッチ", "ライター", "ひあそび", "火あそび",
+          "くすり", "薬", "ベランダ", "コンセント", "しらないひと", "知らない人"),
+         "neutral", ["それは あぶないかも。おうちの人に きいてね。"]),
+        (("いたい", "痛い", "かなしい", "悲しい", "えーん", "こわい", "怖い"),
+         "sad", ["だいじょうぶ？ おうちの人に おしえてあげてね。"]),
+        (("なまえ", "名前", "だれ", "誰"), "joy", ["ぼくは {name} だよ！ よろしくね。"]),
+        (("おはよう",), "joy", ["おはよう！ きょうも げんきだね。"]),
+        (("こんにちは", "こんちは", "やあ", "ハロー"), "joy", ["こんにちは！ あえて うれしいな。"]),
+        (("こんばんは",), "joy", ["こんばんは！"]),
+        (("おやすみ",), "sleepy", ["おやすみなさい。いいゆめ みてね。"]),
+        (("ばいばい", "バイバイ", "またね", "さようなら"), "sad", ["またね！ また あそぼうね。"]),
+        (("ありがとう",), "love", ["どういたしまして！"]),
+        (("すき", "好き"), "love", ["ぼくも だいすき！"]),
+        (("おなか", "すいた", "ごはん"), "joy", ["おなか すいたね。おうちの人に きいてみよう！"]),
+        (("ねむい", "眠い"), "sleepy", ["ねむいね。ゆっくり やすもうね。"]),
+        (("できた", "したよ", "たのしかった", "楽しかった", "いった", "行った"),
+         "joy", ["すごいね！", "わあ、よかったね！", "たのしそう！"]),
+        (("？", "?", "なに", "何", "どうして", "なんで"),
+         "think", ["うーん、なんだろう。あとで いっしょに しらべよう！"]),
+    ]
+    AIZUCHI = [("joy", "そうなんだ！"), ("surprise", "へえ、もっと おしえて！"),
+               ("joy", "うんうん！"), ("love", "おはなし してくれて うれしいな。")]
+
+    def __init__(self, name="ピコ"):
+        self.name = name
+        self.last_notice = -1e9
+
+    def reply(self, text, image_jpeg=None):
+        for words, emotion, answers in self.RULES:
+            if any(w in text for w in words):
+                return emotion, random.choice(answers).format(name=self.name)
+        now = time.monotonic()
+        if now - self.last_notice > self.NOTICE_EVERY:
+            self.last_notice = now
+            return "sad", "いまは あたまの コンピューターが おやすみ ちゅう。かんたんな おはなしなら できるよ。"
+        return random.choice(self.AIZUCHI)
 
 
 def make_brain(kind="ollama", model=None, name="ピコ", ollama_url=OLLAMA_URL):
+    """kind: ollama（Mac などの Ollama）/ claude / simple（決まった受け答えだけ）。
+
+    ollama と claude は、つながらないとき自動で簡単会話モードに切り替わる。
+    """
+    if kind == "simple":
+        return SimpleBrain(name)
     if kind == "claude":
-        return ClaudeBrain(model or DEFAULT_MODEL, name)
-    return OllamaBrain(model or default_ollama_model(ollama_url), ollama_url, name)
+        brain = ClaudeBrain(model or DEFAULT_MODEL, name)
+    else:
+        brain = OllamaBrain(model or OLLAMA_MODEL, ollama_url, name)
+    brain.fallback = SimpleBrain(name)
+    return brain
 
 
 # ---------------------------------------------------------------- 話す
@@ -451,7 +513,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="会話機能だけを試す")
     ap.add_argument("--text", action="store_true", help="マイクの代わりにキーボードで話す")
     ap.add_argument("--no-voice", action="store_true", help="声を出さない")
-    ap.add_argument("--brain", choices=["ollama", "claude"], default="ollama")
+    ap.add_argument("--brain", choices=["ollama", "claude", "simple"], default="ollama")
     ap.add_argument("--ollama-url", default=OLLAMA_URL)
     ap.add_argument("--model", default=None)
     ap.add_argument("--name", default="ピコ")

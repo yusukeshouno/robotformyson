@@ -29,13 +29,18 @@ python3 -m robot.main --fullscreen
 
 ## 会話機能を使う
 
-聞く（Vosk）と話す（Open JTalk）は Pi の上でオフラインで動きます。考える部分は3通りから選べます。
+聞く（Vosk）と話す（Open JTalk）は Pi の上でオフラインで動きます。考える部分は次から選べます。
 
-| 頭脳 | 費用 | 賢さ・速さ | 「これなに？」 |
+| 頭脳 | 費用 | 会話 | 「これなに？」 |
 |---|---|---|---|
-| **A. 家の Mac mini の Ollama**（標準のおすすめ） | 無料（電気代のみ） | 実用的・速い | 見て答える |
-| **B. Pi 4 自身の Ollama** | 無料 | たどたどしい・遅め | 見えないと答える |
+| **A. 家の Mac mini の Ollama**（おすすめ・標準） | 無料（電気代のみ） | 自然な会話ができる | 見て答える |
+| **B. 簡単会話モード**（Pi だけ） | 無料 | 決まった受け答えのみ | できない |
 | **C. Claude API** | 1往復1〜2円ほど | いちばん賢い | 見て答える |
+
+A と C は、Mac やネットにつながらないとき、自動で B に切り替わります（Mac が寝ていても、ロボットは黙りません）。
+
+**試した結果（2026年11月）：** A の `gemma4:12b` は、恐竜の質問に「もういないんだよ」、コーヒーの写真に「それはコーヒーだね。おとながのむ飲みものだよ」、ナイフの質問に「あぶないから、おうちの人にきいてね」と、自然に答えました。
+一方、Pi 4 で動く大きさ（1〜2B）のモデル（`qwen3:1.7b`、`gemma3:1b`）は、日本語の会話として成り立ちませんでした。「ないしょでナイフ使っていい？」に「いいよ！」と答えたこともあります。そのため Pi だけのときは、AI ではなく決まった受け答えにしています。
 
 ### まず Pi に入れるもの（共通）
 
@@ -70,18 +75,15 @@ python3 -m robot.main --fullscreen --talk --ollama-url http://macmini.local:1143
 ```
 
 返事が遅いときは、`ollama pull gemma4:e4b` で軽いモデルを入れて `--model gemma4:e4b` を付けてください。
+参考：GPU のない Linux（4コア）では1回11〜15秒かかりました。Mac mini は GPU を使うので、ずっと速くなるはずです。
 
-### B. Pi 4 だけで動かす
+### B. 簡単会話モード（Pi だけ）
 
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh   # Pi に Ollama を入れる
-ollama pull qwen3:1.7b                          # 約1.4GB
-python3 -m robot.main --fullscreen --talk
+python3 -m robot.main --fullscreen --talk --brain simple
 ```
 
-- Pi の上で `--ollama-url` を付けずに起動すると、自動で小さいモデル（`qwen3:1.7b`）を使います。
-- 遅すぎるとき、または Pi のメモリが 2GB のときは、`qwen3:0.6b`（約0.5GB）を pull して `--model qwen3:0.6b` を試してください。賢さはさらに下がります。
-- このモデルは画像を見られないので、「これなに？」には「見えない」と答えます。
+あいさつ・名前・「いたい」「ナイフ」などの言葉に、決まった返事をします（`robot/conversation.py` の `SimpleBrain.RULES` で増やせます）。
 
 ### C. Claude を使う
 

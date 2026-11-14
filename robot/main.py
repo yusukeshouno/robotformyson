@@ -59,8 +59,8 @@ def parse_args(argv=None):
     ap.add_argument("--udp", type=int, default=5005, help="感情タグ受信ポート（0で無効）")
     ap.add_argument("--talk", action="store_true", help="会話機能を使う")
     ap.add_argument("--name", default="ピコ", help="ロボットの名前")
-    ap.add_argument("--brain", choices=["ollama", "claude"], default="ollama",
-                    help="考える部分: ollama（無料・ローカル）か claude（有料）")
+    ap.add_argument("--brain", choices=["ollama", "claude", "simple"], default="ollama",
+                    help="考える部分: ollama（無料・Mac など）/ claude（有料）/ simple（決まった受け答えだけ）")
     ap.add_argument("--ollama-url", default="http://localhost:11434",
                     help="Ollama の場所（Mac で動かすなら http://<Macの名前>.local:11434）")
     ap.add_argument("--model", default=None, help="使うモデル名")
