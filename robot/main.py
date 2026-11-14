@@ -17,6 +17,7 @@ import pygame
 
 from .audio import add_audio_args
 from .emotion import EmotionEngine
+from .growth import Growth
 from .face import BG, EMOTION_NAMES, Face
 
 
@@ -71,6 +72,7 @@ def parse_args(argv=None):
     ap.add_argument("--voice", default=None, help="Open JTalk の声ファイル (.htsvoice)")
     ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
     add_audio_args(ap)
+    ap.add_argument("--no-growth", action="store_true", help="成長の記録をしない")
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--run-seconds", type=float, default=0, help=argparse.SUPPRESS)
     return ap.parse_args(argv)
@@ -83,11 +85,13 @@ def screen_to_face(x, y, rotate):
     return x, y
 
 
-def start_conversation(args, tracker, last_face):
+def start_conversation(args, tracker, last_face, growth=None):
     """会話機能を起動する。準備が足りなければ理由を表示して顔だけで動く。"""
     try:
         from . import conversation as cv
         brain = cv.make_brain(args.brain, args.model, args.name, args.ollama_url)
+        if growth:  # なかよしになるほど話し方が変わる
+            brain.extra_system = growth.prompt_hint
         audio = cv.AudioSettings.load(args.mic, args.speaker, args.echo_tail)
         mic, speaker = audio.resolve()
         voice = cv.Voice(args.voice, pitch=args.pitch, device=speaker)
@@ -141,10 +145,19 @@ def main(argv=None):
         except OSError as e:
             print(f"UDP {args.udp} を開けませんでした（{e}）")
 
+    growth = None if args.no_growth else Growth()
+    # 顔をおぼえる機能とは faces.on_change(growth.set_person) でつなぐ
+
     last_face = [0.0]
     conv = None
     if args.talk:
-        conv = start_conversation(args, tracker, last_face)
+        conv = start_conversation(args, tracker, last_face, growth)
+
+    def react(reactions):  # 成長からの反応を顔と声に出す
+        for i, (emo, dur, text) in enumerate(reactions):
+            engine.express(emo, dur, now, interrupt=i == 0)
+            if text and conv:
+                conv.say(text)
 
     show_cam, debug = False, args.debug
     talk = 0.0
@@ -177,10 +190,14 @@ def main(argv=None):
                 drag += abs(ev.rel[0]) + abs(ev.rel[1])
                 if drag > S * 0.6:
                     engine.on_stroke(now)
+                    if growth:
+                        react(growth.on_stroke())
                     drag = -1e9  # 1回のなでで1度だけ
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
                 if drag is not None and 0 <= drag < S * 0.05:
                     engine.on_tap(now)
+                    if growth:
+                        react(growth.on_tap())
                 drag = None
 
         present, fx, fy = False, 0.0, 0.0
@@ -195,6 +212,8 @@ def main(argv=None):
         if present:
             last_face[0] = now
         engine.on_face(present, now)
+        if growth:
+            react(growth.on_face(present, dt))
         if listener:
             for emo, dur in listener.poll():
                 engine.express(emo, dur, now)
@@ -202,6 +221,8 @@ def main(argv=None):
             for emo, dur in conv.poll():
                 if emo == "heard":
                     engine.notice(now)
+                    if growth:
+                        react(growth.on_talk())
                 else:
                     engine.express(emo, dur, now)
             talk += (conv.mouth_level() - talk) * 0.6
@@ -222,6 +243,8 @@ def main(argv=None):
                     surf, (w, w * img.shape[0] // img.shape[1])), (8, 8))
         if debug:
             label = f"{emotion}  face={'yes' if present else 'no'}  {clock.get_fps():.0f}fps"
+            if growth:
+                label += f"  Lv{growth.level} {growth.current['points']}pt"
             canvas.blit(font.render(label, True, (200, 200, 200)), (8, S - font.get_height() - 8))
 
         screen.fill(BG)
@@ -231,6 +254,11 @@ def main(argv=None):
 
     if tracker:
         tracker.stop()
+    if growth:
+        try:
+            growth.save()
+        except OSError as e:
+            print(f"成長の記録を保存できませんでした（{e}）")
     pygame.quit()
 
 

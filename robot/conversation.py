@@ -141,6 +141,7 @@ class _BrainBase:
 
     def __init__(self, name, max_turns):
         self.system = SYSTEM_PROMPT.format(name=name)
+        self.extra_system = None  # () -> 指示に足す文（成長のレベルや相手の名前など）
         self.max_turns = max_turns
         self.history = []
         self.fallback = None  # つながらないときに代わりに答える頭脳（SimpleBrain）
@@ -166,6 +167,10 @@ class _BrainBase:
                          {"role": "assistant", "content": f"[{emotion}] {answer}"}]
         self.history = self.history[-2 * self.max_turns:]
         return emotion, answer
+
+    def system_prompt(self):
+        extra = self.extra_system() if self.extra_system else ""
+        return self.system + ("\n" + extra if extra else "")
 
     def _ask(self, text, image_jpeg):
         raise NotImplementedError
@@ -195,7 +200,7 @@ class ClaudeBrain(_BrainBase):
             resp = self.client.beta.messages.create(
                 model=self.model,
                 max_tokens=4000,
-                system=self.system,
+                system=self.system_prompt(),
                 messages=self.history + [{"role": "user", "content": content}],
                 output_config={"effort": self.effort},
                 # 安全上の理由で断られたとき、サーバー側で別モデルに自動で切り替える
@@ -277,7 +282,7 @@ class OllamaBrain(_BrainBase):
             user["images"] = [base64.standard_b64encode(image_jpeg).decode()]
         body = {
             "model": self.model,
-            "messages": [{"role": "system", "content": self.system}] + self.history + [user],
+            "messages": [{"role": "system", "content": self.system_prompt()}] + self.history + [user],
             "stream": False,
             "keep_alive": "30m",  # モデルを読みこんだままにして、次の返事を速くする
             # 短い会話なので記憶する長さ(num_ctx)を絞ってメモリを節約する
@@ -527,6 +532,7 @@ class Conversation:
         self.wake_words = tuple(wake_words)
         self.events = queue.Queue()
         self.last_reply = 0.0
+        self._speak_lock = threading.Lock()
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -561,18 +567,28 @@ class Conversation:
         emotion, answer = self.brain.reply(text, image)
         print(f"[{emotion}] {answer}")
         self.events.put((emotion, 60))
-        if self.voice:
+        self._speak(answer)
+        self.events.put((emotion, 1.5))
+        self.last_reply = time.monotonic()
+        return emotion, answer
+
+    def _speak(self, text):
+        if not self.voice:
+            return
+        with self._speak_lock:  # 返事と あいさつが重ならないように
             # 話している間はマイクを閉じる。開くのは、話し終えて余韻の時間がたってから
             if self.ears:
                 self.ears.mute(True)
             try:
-                self.voice.speak(answer)
+                self.voice.speak(text)
             finally:
                 if self.ears:
                     self.ears.mute(False)
-        self.events.put((emotion, 1.5))
-        self.last_reply = time.monotonic()
-        return emotion, answer
+
+    def say(self, text):
+        """自分から話す（あいさつ・レベルアップなど）。裏で話すのですぐ戻る。"""
+        print(f"[ひとりごと] {text}")
+        threading.Thread(target=self._speak, args=(text,), daemon=True).start()
 
     def poll(self):
         out = []
