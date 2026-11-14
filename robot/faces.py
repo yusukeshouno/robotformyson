@@ -562,7 +562,8 @@ def main(argv=None):
     sub.add_parser("list", help="登録した人の一覧")
     a = sub.add_parser("add", help="カメラを見てもらって登録する")
     a.add_argument("name")
-    a.add_argument("--camera-index", type=int, default=0)
+    from .camera import add_camera_args
+    add_camera_args(a)
     a.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0)
     s = sub.add_parser("set", help="呼び方・あいさつの表情を変える")
     s.add_argument("name")
@@ -589,8 +590,9 @@ def main(argv=None):
         print(f"（保存場所: {db.path}）")
         return
     if args.cmd == "add":
+        from .camera import settings_from_args
         from .vision import FaceTracker
-        tracker = FaceTracker("auto", args.camera_index, rotate=args.rotate).start()
+        tracker = FaceTracker("auto", settings_from_args(args), rotate=args.rotate).start()
         rec = FaceRecognizer(db, Embedder()).start(tracker.latest)
         print(f"{args.name} さん、カメラを見てください…")
         rec.enroll(args.name)

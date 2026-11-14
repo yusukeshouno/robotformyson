@@ -16,6 +16,7 @@ import time
 import pygame
 
 from .audio import add_audio_args
+from .camera import add_camera_args, settings_from_args
 from .emotion import EmotionEngine
 from .growth import Growth
 from .memory import Memory
@@ -58,13 +59,17 @@ def parse_args(argv=None):
     ap.add_argument("--mouse", action="store_true", help="マウスを顔として扱う（カメラ不要）")
     ap.add_argument("--no-camera", action="store_true")
     ap.add_argument("--camera", choices=["auto", "picamera", "opencv"], default="auto")
-    ap.add_argument("--camera-index", type=int, default=0)
+    add_camera_args(ap)
     ap.add_argument("--screen-rotate", type=int, choices=[0, 90, 180, 270], default=0,
                     help="画面の回転（時計回り）。ケースに入れた向きに合わせる")
     ap.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
                     help="カメラの取り付け向きの補正")
     ap.add_argument("--no-mirror", action="store_true",
                     help="目が人と逆を向くときに指定")
+    ap.add_argument("--gaze-gain", type=float, default=1.3,
+                    help="目の動きの大きさ（カメラの写る範囲が広いときは大きく）")
+    ap.add_argument("--gaze-offset-y", type=float, default=0.0,
+                    help="目の上下のずれの補正（カメラが画面の上にあって目が下を向きすぎるときは -0.2 など）")
     ap.add_argument("--udp", type=int, default=5005, help="感情タグ受信ポート（0で無効）")
     ap.add_argument("--talk", action="store_true", help="会話機能を使う")
     ap.add_argument("--no-faces", action="store_true",
@@ -177,9 +182,9 @@ def main(argv=None):
     if not (args.no_camera or args.mouse):
         try:
             from .vision import FaceTracker
-            tracker = FaceTracker(args.camera, args.camera_index,
+            tracker = FaceTracker(args.camera, settings_from_args(args),
                                   mirror=not args.no_mirror, rotate=args.rotate).start()
-            print(f"カメラ: {tracker.backend}")
+            print(f"カメラ: {tracker.label}")
         except Exception as e:  # カメラがなくても顔だけは動かす
             print(f"カメラを使わずに起動します（{e}）")
 
@@ -273,7 +278,7 @@ def main(argv=None):
         present, fx, fy = False, 0.0, 0.0
         if tracker:
             present, fx, fy = tracker.get()
-            fx, fy = fx * 1.3, fy * 1.3
+            fx, fy = fx * args.gaze_gain, fy * args.gaze_gain + args.gaze_offset_y
         elif args.mouse and pygame.mouse.get_focused():
             mx, my = pygame.mouse.get_pos()
             fx, fy = screen_to_face((mx - sw / 2) / S * 2, (my - sh / 2) / S * 2,

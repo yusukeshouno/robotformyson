@@ -25,6 +25,8 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from .camera import looks_like_camera
+
 ENV_MIC = "ROBOT_MIC"
 ENV_SPEAKER = "ROBOT_SPEAKER"
 ENV_ECHO_TAIL = "ROBOT_ECHO_TAIL"
@@ -83,6 +85,9 @@ def resolve_device(spec, kind, devices=None):
             return spec
     else:
         want = spec.lower()
+        if kind == "input" and not looks_like_camera(want):
+            # 「usb」などのあいまいな名前では、Web カメラ内蔵のマイクより先に、ほかのマイクを選ぶ
+            usable.sort(key=lambda item: looks_like_camera(item[1]["name"]))
         for match in (lambda n: n == want, lambda n: want in n):
             for i, d in usable:
                 if match(d["name"].lower()):
@@ -187,9 +192,17 @@ def output_channels(device):
 
 # ---------------------------------------------------------------- PipeWire の設定づくり
 def pick_node(pw_dump, media_class, match, exclude=("robot_aec",)):
-    """pw-dump の結果から、media.class が一致し名前に match を含むノード名を選ぶ。"""
+    """pw-dump の結果から、media.class が一致し名前に match を含むノード名を選ぶ。
+
+    マイクを選ぶときは、Web カメラ内蔵のマイクは後回し（match がカメラの名前のときは別）。
+    """
     want = match.lower()
-    for obj in pw_dump:
+    objs = list(pw_dump)
+    if media_class == "Audio/Source" and not looks_like_camera(want):
+        objs.sort(key=lambda o: looks_like_camera(" ".join(
+            str(((o.get("info") or {}).get("props") or {}).get(k, ""))
+            for k in ("node.name", "node.description", "node.nick"))))
+    for obj in objs:
         props = (obj.get("info") or {}).get("props") or {}
         if props.get("media.class") != media_class:
             continue

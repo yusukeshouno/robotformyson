@@ -25,14 +25,15 @@ Raspberry Pi 4 ＋小型正方形ディスプレイ＋カメラで動く、エ�
 | 頭脳 | Raspberry Pi 4 Model B | 手元にある |
 | 顔 | Pimoroni HyperPixel 4.0 Square（XP 版・720×720） | 手元にある |
 | 会話の頭脳 | Mac mini（Ollama） | 手元にある |
-| 目 | Raspberry Pi Camera Module 3 Wide | 用意する |
+| 目 | USB Web カメラ（サンワサプライ 400-CAM103） | 手元にある（Camera Module 3 も使える） |
 | 耳 | SunFounder USB ミニマイク | 注文済み |
 | 口 | Pi の 3.5mm 出力 → PAM8403 アンプ基板（USB 5V 給電）→ 3W 4Ω スピーカー ×2 | 注文済み |
 | 電源・記憶 | Pi 4 用 5V 3A USB-C 電源、microSD 32GB 以上 | 用意する（手持ちがあれば不要） |
 
-- HyperPixel は GPIO ピンをすべて使いますが、カメラは専用のカメラ端子、マイクは USB、スピーカーは 3.5mm 端子なので、ピンは足りなくなりません。
+- HyperPixel は GPIO ピンをすべて使いますが、カメラとマイクは USB、スピーカーは 3.5mm 端子なので、ピンは足りなくなりません。
 - HyperPixel を上にかぶせると、Pi 4 の上に大きなファンを付けられません。CPU が熱くなりやすいので、薄型のヒートシンクを貼るか、ケースに空気の通り道を作ってください。
-- カメラのケーブル（フラットケーブル）は、HyperPixel と Pi の間を通して横から出します。
+- カメラは画面のすぐ上に付けると、目が合っているように見えます。
+- カメラモジュールを使うときは、フラットケーブルを HyperPixel と Pi の間を通して横から出します。
 
 ## HyperPixel 4.0 Square の設定
 
@@ -56,7 +57,24 @@ git clone <このリポジトリ> && cd robotformyson
 python3 -m robot.main --fullscreen
 ```
 
-- カメラモジュールは picamera2、USB カメラは OpenCV で自動的に選ばれます。
+- USB カメラがあればそれを使い、なければカメラモジュール（picamera2）を使います。
+
+### カメラ（ピコの目）の確認
+
+USB カメラをさしたら、まずこれ:
+
+```bash
+python3 -m robot.camera list     # カメラとマイクの一覧。どれを目に使うか表示
+python3 -m robot.camera check    # 5秒うつして、速さと顔が見えるかを調べる。写真は ~/camera_check.jpg
+```
+
+- Pi には `/dev/video10` などカメラではない映像デバイスもあるので、USB カメラを名前で自動で探します。
+- 標準は 640x480・15fps・MJPG（Pi 4 で顔を追うのに十分で、軽い）。変えるときは
+  `ROBOT_CAMERA_SIZE=320x240` / `ROBOT_CAMERA_FPS=10` / `ROBOT_CAMERA_FORMAT=YUYV`。
+- カメラが2台あるときは `--camera-device CAM103`（名前の一部・番号・`/dev/video2`）か `ROBOT_CAMERA=CAM103`。
+- 動いている途中で USB を抜いても、さしなおせば数秒でつなぎなおします。
+- Web カメラのマイクは耳には使いません。`ROBOT_MIC=usb` のようにあいまいに指定しても、カメラのマイクは後回しにして USB ミニマイクを選びます（`tools/setup_audio.sh` も同じ）。
+- 目の動きが小さい・大きいときは `--gaze-gain 1.6`、カメラが画面の上にあって目が下を向きすぎるときは `--gaze-offset-y -0.2` で調整します。
 - 目が人と逆の方向を見るときは `--no-mirror` を付けてください。
 - カメラを横向き・逆さに付けたときは `--rotate 90`（または 180, 270）で補正します。
 
@@ -363,7 +381,8 @@ echo "joy 3" | nc -u -w0 127.0.0.1 5005
 |---|---|
 | `robot/face.py` | 表情の描画（ピクセルアート）。感情ごとのパラメータを補間し、小物や動きを付けて描く。`EMOTIONS` に足せば表情を増やせる。`python3 tools/preview.py out.gif` で動きを GIF にできる（Pillow が必要） |
 | `robot/emotion.py` | 感情エンジン。顔・タッチ・外部指示から今の感情を決める |
-| `robot/vision.py` | カメラと顔検出（別スレッド） |
+| `robot/vision.py` | カメラと顔検出（別スレッド）。USB を抜いてもつなぎなおす |
+| `robot/camera.py` | 目にするカメラを探して開く（USB カメラ優先・Pi 4 向けの設定）・確認コマンド |
 | `robot/conversation.py` | 会話：聞く（Vosk）・考える（Ollama / Claude）・話す（Open JTalk） |
 | `robot/main.py` | 起動・入力処理・画面更新 |
 | `robot/growth.py` | 成長：人ごとのなかよし度・レベル・家族向けの記録 |
