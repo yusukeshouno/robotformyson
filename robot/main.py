@@ -20,6 +20,7 @@ from .camera import add_camera_args, settings_from_args
 from .emotion import EmotionEngine
 from .growth import Growth
 from .memory import Memory
+from .neck import NeckLink, NeckMotion, add_neck_args
 from .language import Language
 from . import personality
 from .face import BG, EMOTION_NAMES, Face
@@ -84,6 +85,7 @@ def parse_args(argv=None):
     ap.add_argument("--voice", default=None, help="Open JTalk の声ファイル (.htsvoice)")
     ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
     add_audio_args(ap)
+    add_neck_args(ap)
     ap.add_argument("--no-growth", action="store_true", help="成長の記録をしない")
     ap.add_argument("--no-garden", action="store_true",
                     help="背景の「ピコの庭」を出さない（なかよし度で育つ植物）")
@@ -156,6 +158,18 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
     return conv
 
 
+def start_neck(args):
+    """首の動き。基板がなくても動きの計算はして、--neck-preview なら画面で見せる。"""
+    if args.no_neck:
+        return None, None
+    link = NeckLink(args.neck_device, args.neck_invert_pan, args.neck_invert_tilt)
+    if link.connect():
+        print(f"首: {link.label}")
+    elif not args.neck_preview:
+        print("首: 基板が見つからないので動かしません（させば自動でつながります）")
+    return NeckMotion(camera_on_head=args.neck_camera == "head"), link
+
+
 def main(argv=None):
     args = parse_args(argv)
     pygame.display.init()
@@ -218,6 +232,8 @@ def main(argv=None):
             memory.set_person(*faces.current())
             memory.start()
 
+    neck, link = start_neck(args)
+
     last_face = [0.0]
     conv = None
     if args.talk:
@@ -265,6 +281,8 @@ def main(argv=None):
                 drag += abs(ev.rel[0]) + abs(ev.rel[1])
                 if drag > S * 0.6:
                     engine.on_stroke(now)
+                    if neck:
+                        neck.nuzzle()
                     if growth:
                         react(growth.on_stroke())
                     drag = -1e9  # 1回のなでで1度だけ
@@ -302,7 +320,10 @@ def main(argv=None):
         if conv:
             for emo, dur in conv.poll():
                 if emo == "heard":
-                    engine.notice(now)
+                    if engine.notice(now) and neck:
+                        neck.perk()  # 眠っていたら、はっと顔を上げる
+                    elif neck:
+                        neck.nod()   # 聞こえたよ、のうなずき
                     if growth:
                         react(growth.on_talk())
                 else:
@@ -316,6 +337,12 @@ def main(argv=None):
         face.set_mood(*engine.mood(now))
         face.look_at((max(-1, min(1, fx)), max(-1, min(1, fy))) if present else None)
         face.update(dt)
+        head = (0.0, 0.0)
+        if neck:
+            head = neck.update(dt, emotion, face.gaze,
+                               (max(-1, min(1, fx)), max(-1, min(1, fy))) if present else None,
+                               talk, engine.sleeping)
+            link.send(*head)
         if garden:
             dots.draw(canvas, face, garden.update(dt), garden.keep)
         else:
@@ -330,6 +357,8 @@ def main(argv=None):
                     surf, (w, w * img.shape[0] // img.shape[1])), (8, 8))
         if debug:
             label = f"{emotion}  face={'yes' if present else 'no'}  {clock.get_fps():.0f}fps"
+            if neck:
+                label += f"  neck={head[0]:+.0f},{head[1]:+.0f}{'' if link.fd is not None else ' (off)'}"
             if growth:
                 label += f"  Lv{growth.level} {growth.current['points']}pt"
             if faces:
@@ -338,9 +367,16 @@ def main(argv=None):
 
         screen.fill(BG)
         out = pygame.transform.rotate(canvas, -args.screen_rotate) if args.screen_rotate else canvas
-        screen.blit(out, ((sw - out.get_width()) // 2, (sh - out.get_height()) // 2))
+        ox = oy = 0
+        if args.neck_preview:  # 首の部品がなくても、顔の位置で首の動きを見せる
+            ox, oy = int(head[0] / 40 * S * 0.12), int(-head[1] / 20 * S * 0.08)
+            ox, oy = screen_to_face(ox, oy, (360 - args.screen_rotate) % 360)
+            ox, oy = int(ox), int(oy)
+        screen.blit(out, ((sw - out.get_width()) // 2 + ox, (sh - out.get_height()) // 2 + oy))
         pygame.display.flip()
 
+    if link:
+        link.close()
     if memory:
         try:
             memory.stop()
