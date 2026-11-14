@@ -116,6 +116,11 @@ class FaceTracker:
             present = time.monotonic() - self._last_seen < 0.6
             return present, self._pos[0], self._pos[1]
 
+    def latest(self):
+        """今のカメラ画像（回転済み・元の大きさの BGR）。顔の見分けなどで使う。"""
+        with self._lock:
+            return None if self._full is None else self._full.copy()
+
     def jpeg(self, quality=80):
         """今のカメラ画像を JPEG で返す（会話で「これなに？」と聞かれたとき用）。"""
         with self._lock:

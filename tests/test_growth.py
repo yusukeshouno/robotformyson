@@ -157,3 +157,13 @@ def test_brain_gets_hint():
     assert brain.system_prompt() == brain.system
     brain.extra_system = lambda: "- テスト"
     assert brain.system_prompt().endswith("\n- テスト")
+
+
+def test_switch_greeting_can_be_left_to_face_greeter(tmp_path):
+    from robot.growth import Growth
+    g = Growth(path=str(tmp_path / "g.json"))
+    g.on_face(True, 0.1)
+    g.greet_on_switch = False
+    g.set_person("p1", "ゆうくん")
+    out = g.on_face(True, 0.1)
+    assert all(text is None for _, _, text in out)
