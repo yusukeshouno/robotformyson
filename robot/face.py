@@ -160,6 +160,26 @@ SPR_EXCLAIM = _sprite("##", "##", "##", "##", "..", "##")
 SPR_VEIN = _sprite(".#..#.", "##..##", "......", "##..##", ".#..#.")
 
 
+def dot_grid(w, h, nx, ny):
+    """ドットのすきまと角を描いた重ね絵（w×h ピクセルを nx×ny ドットに分ける）。"""
+    key = (255, 0, 255)
+    g = pygame.Surface((w, h))
+    g.fill(key)
+    g.set_colorkey(key)
+    xs = [round(i * w / nx) for i in range(nx + 1)]
+    ys = [round(j * h / ny) for j in range(ny + 1)]
+    gap = max(1, round(w / nx * 0.14))
+    for e in xs:
+        g.fill(BG, (e - gap // 2, 0, gap, h))
+    for e in ys:
+        g.fill(BG, (0, e - gap // 2, w, gap))
+    c = max(1, gap // 2 + (1 if w / nx >= 10 else 0))  # 角を少し落として丸いドットに
+    for ex in xs:
+        for ey in ys:
+            g.fill(BG, (ex - gap // 2 - c, ey - gap // 2 - c, gap + 2 * c, gap + 2 * c))
+    return g
+
+
 class Face:
     def __init__(self, size):
         self.size = size
@@ -322,8 +342,19 @@ class Face:
         return round(dx), round(dy), pop
 
     # ---- 描画 ----
-    def draw(self, surf):
+    def draw(self, surf, backdrop=None):
+        """顔を surf いっぱいに描く。backdrop は render() と同じ。"""
         S = surf.get_width()
+        self.render(backdrop)
+        pygame.surfarray.blit_array(self.lo, self.img.swapaxes(0, 1))
+        pygame.transform.scale(self.lo, (S, S), surf)
+        surf.blit(self._grid(S), (0, 0))
+
+    def render(self, backdrop=None):
+        """self.img（48×48×3 のドット）に顔を描く。
+
+        backdrop（48×48×3 の明るさ）を渡すと、消えているドットに足して模様を透かす。
+        """
         p = self.params
         color = tuple(int(c) for c in p["color"])
         self.c_main = color
@@ -331,10 +362,12 @@ class Face:
         self.c_shade = _mix(color, OFF, 0.45)
         self.c_dark = _mix(color, BG, 0.8)
 
-        self.img = np.empty((N, N, 3), np.uint8)
-        self.img[:] = OFF
+        if backdrop is None:
+            self.img = np.empty((N, N, 3), np.uint8)
+            self.img[:] = OFF
+        else:
+            self.img = np.clip(backdrop + OFF, 0, 255).astype(np.uint8)
         dx, dy, pop = self._motion()
-        gx, gy = self.gaze
         blink = self._blink_factor()
 
         self._draw_blush(dx, dy)
@@ -343,28 +376,11 @@ class Face:
         self._draw_brows(dx, dy)
         self._draw_mouth(dx, dy)
         self._draw_fx(dx, dy)
-
-        pygame.surfarray.blit_array(self.lo, self.img.swapaxes(0, 1))
-        pygame.transform.scale(self.lo, (S, S), surf)
-        surf.blit(self._grid(S), (0, 0))
+        return self.img
 
     def _grid(self, S):
-        """ドットのすきまと角を描いた重ね絵（大きさが変わったときだけ作る）。"""
         if self.grid is None or self.grid.get_width() != S:
-            key = (255, 0, 255)
-            g = pygame.Surface((S, S))
-            g.fill(key)
-            g.set_colorkey(key)
-            edges = [round(i * S / N) for i in range(N + 1)]
-            gap = max(1, round(S / N * 0.14))
-            for e in edges:
-                g.fill(BG, (e - gap // 2, 0, gap, S))
-                g.fill(BG, (0, e - gap // 2, S, gap))
-            c = max(1, gap // 2 + (1 if S / N >= 10 else 0))  # 角を少し落として丸いドットに
-            for ex in edges:
-                for ey in edges:
-                    g.fill(BG, (ex - gap // 2 - c, ey - gap // 2 - c, gap + 2 * c, gap + 2 * c))
-            self.grid = g
+            self.grid = dot_grid(S, S, N, N)
         return self.grid
 
     # ---- 部品の描きこみ（座標はすべてドット単位） ----

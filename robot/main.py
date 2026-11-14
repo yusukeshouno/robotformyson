@@ -22,6 +22,7 @@ from .memory import Memory
 from .language import Language
 from . import personality
 from .face import BG, EMOTION_NAMES, Face
+from .screen import DotScreen
 
 
 class EmotionListener:
@@ -50,7 +51,8 @@ class EmotionListener:
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="エンタメロボットの顔デモ")
-    ap.add_argument("--size", type=int, default=720, help="ウィンドウの一辺(px)")
+    ap.add_argument("--size", default="720",
+                    help="ウィンドウの大きさ(px)。一辺だけ（720）か 幅x高さ（480x800）")
     ap.add_argument("--fullscreen", action="store_true")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--mouse", action="store_true", help="マウスを顔として扱う（カメラ不要）")
@@ -78,6 +80,8 @@ def parse_args(argv=None):
     ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
     add_audio_args(ap)
     ap.add_argument("--no-growth", action="store_true", help="成長の記録をしない")
+    ap.add_argument("--no-garden", action="store_true",
+                    help="背景の「ピコの庭」を出さない（なかよし度で育つ植物）")
     ap.add_argument("--personality", choices=personality.MODES, default="curious",
                     help="curious=好奇心いっぱいの年下の友達 / plain=前と同じ / weekly=週ごとに入れかえて比べる")
     ap.add_argument("--no-language", action="store_true",
@@ -155,12 +159,15 @@ def main(argv=None):
         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         pygame.mouse.set_visible(False)
     else:
-        screen = pygame.display.set_mode((args.size, args.size))
+        w, _, h = args.size.lower().partition("x")
+        screen = pygame.display.set_mode((int(w), int(h or w)))
     pygame.display.set_caption("robot face")
     sw, sh = screen.get_size()
-    S = min(sw, sh)
-    offset = ((sw - S) // 2, (sh - S) // 2)
-    canvas = pygame.Surface((S, S))
+    # 顔がまっすぐ見える向きでの画面の大きさ。縦長なら顔の上下にも背景を描く
+    dots = DotScreen(*((sh, sw) if args.screen_rotate in (90, 270) else (sw, sh)))
+    S = dots.face_size
+    canvas = pygame.Surface(dots.size)
+    cw, ch = dots.size
 
     face = Face(S)
     engine = EmotionEngine(time.monotonic())
@@ -186,6 +193,10 @@ def main(argv=None):
             print(f"UDP {args.udp} を開けませんでした（{e}）")
 
     growth = None if args.no_growth else Growth()
+    garden = None
+    if growth and not args.no_garden:
+        from .garden import Garden
+        garden = Garden(growth, dots.rows, dots.top)
     memory = None if (args.no_memory or not args.talk or not faces) else Memory(robot=args.name)
     language = None if (args.no_language or not args.talk) else Language()
     if faces:  # 見分けた人ごとに、なかよし度と記憶を切りかえる
@@ -265,8 +276,8 @@ def main(argv=None):
             fx, fy = fx * 1.3, fy * 1.3
         elif args.mouse and pygame.mouse.get_focused():
             mx, my = pygame.mouse.get_pos()
-            fx, fy = screen_to_face((mx - offset[0]) / S * 2 - 1,
-                                    (my - offset[1]) / S * 2 - 1, args.screen_rotate)
+            fx, fy = screen_to_face((mx - sw / 2) / S * 2, (my - sh / 2) / S * 2,
+                                    args.screen_rotate)
             present = abs(fx) <= 1 and abs(fy) <= 1
         if present:
             last_face[0] = now
@@ -300,7 +311,10 @@ def main(argv=None):
         face.set_mood(*engine.mood(now))
         face.look_at((max(-1, min(1, fx)), max(-1, min(1, fy))) if present else None)
         face.update(dt)
-        face.draw(canvas)
+        if garden:
+            dots.draw(canvas, face, garden.update(dt), garden.keep)
+        else:
+            dots.draw(canvas, face)
 
         if show_cam and tracker:
             img = tracker.preview()
@@ -315,11 +329,11 @@ def main(argv=None):
                 label += f"  Lv{growth.level} {growth.current['points']}pt"
             if faces:
                 label += f"  who={faces.current()[0] or '-'}"  # 日本語は既定のフォントで出ないので id
-            canvas.blit(font.render(label, True, (200, 200, 200)), (8, S - font.get_height() - 8))
+            canvas.blit(font.render(label, True, (200, 200, 200)), (8, ch - font.get_height() - 8))
 
         screen.fill(BG)
-        screen.blit(pygame.transform.rotate(canvas, -args.screen_rotate)
-                    if args.screen_rotate else canvas, offset)
+        out = pygame.transform.rotate(canvas, -args.screen_rotate) if args.screen_rotate else canvas
+        screen.blit(out, ((sw - out.get_width()) // 2, (sh - out.get_height()) // 2))
         pygame.display.flip()
 
     if memory:
