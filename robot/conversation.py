@@ -1,7 +1,9 @@
-"""会話機能：聞く（Vosk）→ 考える（Claude）→ 話す（Open JTalk）。
+"""会話機能：聞く（Vosk）→ 考える（Ollama または Claude）→ 話す（Open JTalk）。
 
-音声認識と音声合成は Pi の上でオフラインで動き、ネットに出るのは Claude への問い合わせだけ。
-単体でも試せる:
+聞く・話すは Pi の上でオフラインで動く。考える部分は
+  - Ollama（無料・ローカル）: Pi 自身、または家の Mac などで動かす
+  - Claude（有料・クラウド）
+から選べる。単体でも試せる:
 
     python3 -m robot.conversation --text            # キーボードで話しかける（マイク不要）
     python3 -m robot.conversation --text --no-voice # 声も出さない
@@ -17,11 +19,17 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
+import urllib.error
+import urllib.request
 import wave
 
 import numpy as np
 
-DEFAULT_MODEL = "claude-opus-5-5"
+DEFAULT_MODEL = "claude-opus-5-5"            # Claude を使うとき
+OLLAMA_URL = "http://localhost:11434"
+OLLAMA_MODEL_PC = "gemma4:12b"                # Mac mini など（画像も見られる）
+OLLAMA_MODEL_PI = "qwen3:1.7b"                # Raspberry Pi 4 の上で動かすとき（文字だけ）
 DEFAULT_VOSK = os.path.join(os.path.dirname(__file__), "..", "models", "vosk-model-small-ja-0.22")
 REPLY_EMOTIONS = ("neutral", "joy", "sad", "angry", "surprise", "love")
 
@@ -34,13 +42,31 @@ SYSTEM_PROMPT = """あなたは「{name}」という名前の、机の上にい�
 - 火・刃物・薬・高いところ・知らない人について行くなど、危ないことは「おうちの人に聞いてね」と伝えてください。こわい話や大人向けの話はしません。
 - 住所や学校の名前などの個人情報は聞かないでください。言われても、くり返したり覚えたりしないでください。
 - 音声認識の聞きまちがいで、意味が通らない文が届くことがあります。そのときは「もういっかい言って？」と聞き返してください。
-- わからないことは、わからないと言ってください。"""
+- わからないことは、わからないと言ってください。
+
+返事の例：
+[joy] わあ、いいね！ いっしょに あそぼう。
+[surprise] えっ、ほんとう？ すごいね！"""
 
 # この言葉が入っていたら、カメラの画像をいっしょに送る
 LOOK_WORDS = ("これ", "それ", "見て", "みて", "見える", "みえる", "だれ", "誰",
               "何色", "なにいろ", "持って", "もって")
 
 _TAG_RE = re.compile(r"^\s*\[(\w+)\]\s*")
+_THINK_RE = re.compile(r"<think>.*?(</think>|$)", re.S)
+
+# ローカルの小さなモデル向けの、最後の安全網（返事にこれが入っていたら言いかえる）
+NG_WORDS = ("死ね", "殺す", "ころす", "自殺", "しね", "セックス", "エロ", "麻薬", "爆弾")
+SAFE_REPLY = ("neutral", "うーん、べつの おはなし しよう！")
+
+
+def clean_for_speech(text):
+    """読み上げに向かないもの（考えの途中・記号・絵文字）を取りのぞく。"""
+    text = _THINK_RE.sub("", text)
+    text = "".join(ch for ch in text
+                   if unicodedata.category(ch) not in ("So", "Cs", "Co")
+                   and ch not in "*#`_~>|")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def parse_reply(text):
@@ -56,19 +82,59 @@ def wants_look(text):
 
 
 # ---------------------------------------------------------------- 考える
-class Brain:
-    def __init__(self, model=DEFAULT_MODEL, name="ピコ", effort="low", max_turns=10,
-                 client=None):
-        if client is None:
-            import anthropic
-            client = anthropic.Anthropic()  # ANTHROPIC_API_KEY を使う
-        self.client = client
-        self.model, self.effort, self.max_turns = model, effort, max_turns
+class BrainError(Exception):
+    """考えられなかったとき。ロボットが代わりに言う (感情, 返事) を持つ。"""
+
+    def __init__(self, emotion, answer):
+        super().__init__(answer)
+        self.emotion, self.answer = emotion, answer
+
+
+class _BrainBase:
+    vision = True  # 画像を見られるか
+
+    def __init__(self, name, max_turns):
         self.system = SYSTEM_PROMPT.format(name=name)
+        self.max_turns = max_turns
         self.history = []
 
     def reply(self, text, image_jpeg=None):
         """(感情, 返事) を返す。通信エラーでも例外にせず、謝る返事を返す。"""
+        if not self.vision:
+            if wants_look(text):
+                text += "（いまは カメラが つかえないので、見えていません）"
+            image_jpeg = None
+        try:
+            emotion, answer = self._ask(text, image_jpeg)
+        except BrainError as e:
+            return e.emotion, e.answer
+        answer = clean_for_speech(answer)
+        if not answer:
+            emotion, answer = "surprise", "えっと、もういっかい いって？"
+        # 履歴は文字だけ残す（画像は毎回送り直さない）
+        note = "（カメラの画像つき）" if image_jpeg else ""
+        self.history += [{"role": "user", "content": text + note},
+                         {"role": "assistant", "content": f"[{emotion}] {answer}"}]
+        self.history = self.history[-2 * self.max_turns:]
+        return emotion, answer
+
+    def _ask(self, text, image_jpeg):
+        raise NotImplementedError
+
+
+class ClaudeBrain(_BrainBase):
+    """Claude API（有料）。"""
+
+    def __init__(self, model=DEFAULT_MODEL, name="ピコ", effort="low", max_turns=10,
+                 client=None):
+        super().__init__(name, max_turns)
+        if client is None:
+            import anthropic
+            client = anthropic.Anthropic()  # ANTHROPIC_API_KEY を使う
+        self.client = client
+        self.model, self.effort = model, effort
+
+    def _ask(self, text, image_jpeg):
         import anthropic
         content = []
         if image_jpeg:
@@ -89,29 +155,103 @@ class Brain:
             )
         except anthropic.AuthenticationError:
             print("[会話] API キーが正しくありません（ANTHROPIC_API_KEY を確認）")
-            return "sad", "ごめんね、いまは おはなしの じゅんびが できてないみたい。"
+            raise BrainError("sad", "ごめんね、いまは おはなしの じゅんびが できてないみたい。")
         except anthropic.RateLimitError:
-            return "sleepy", "ちょっと つかれちゃった。すこし まってね。"
+            raise BrainError("sleepy", "ちょっと つかれちゃった。すこし まってね。")
         except (anthropic.APIConnectionError, anthropic.APITimeoutError):
-            return "sad", "ごめんね、いま インターネットに つながらないみたい。"
+            raise BrainError("sad", "ごめんね、いま インターネットに つながらないみたい。")
         except anthropic.APIStatusError as e:
             print(f"[会話] API エラー {e.status_code}: {e.message}")
-            return "sad", "ごめんね、うまく かんがえられなかった。"
-
+            raise BrainError("sad", "ごめんね、うまく かんがえられなかった。")
         if resp.stop_reason == "refusal":
-            emotion, answer = "sad", "ごめんね、そのおはなしは できないんだ。"
-        else:
-            raw = "".join(b.text for b in resp.content if b.type == "text")
-            emotion, answer = parse_reply(raw)
-            if not answer:
-                emotion, answer = "surprise", "えっと、もういっかい いって？"
+            return "sad", "ごめんね、そのおはなしは できないんだ。"
+        return parse_reply("".join(b.text for b in resp.content if b.type == "text"))
 
-        # 履歴は文字だけ残す（画像は毎回送り直さない）
-        note = "（カメラの画像つき）" if image_jpeg else ""
-        self.history += [{"role": "user", "content": text + note},
-                         {"role": "assistant", "content": f"[{emotion}] {answer}"}]
-        self.history = self.history[-2 * self.max_turns:]
+
+Brain = ClaudeBrain  # 以前の名前
+
+
+class OllamaBrain(_BrainBase):
+    """Ollama（無料・ローカル）。Pi 自身でも、同じ Wi-Fi の Mac などでも動かせる。"""
+
+    def __init__(self, model=OLLAMA_MODEL_PC, url=OLLAMA_URL, name="ピコ", max_turns=10,
+                 timeout=120):
+        super().__init__(name, max_turns)
+        self.model, self.url, self.timeout = model, url.rstrip("/"), timeout
+        self._caps = None
+        self._probe()
+
+    # Ollama の能力（画像・考える機能）を問い合わせる。つながらなければ後でやり直す
+    def _probe(self):
+        try:
+            info = self._post("/api/show", {"model": self.model}, 10)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise RuntimeError(f"Ollama にモデル {self.model} がありません"
+                                   f"（ollama pull {self.model}）")
+            raise
+        except OSError as e:
+            print(f"[会話] Ollama ({self.url}) にまだつながりません（{e}）。あとで再接続します")
+            return
+        self._caps = set(info.get("capabilities") or [])
+        print(f"[会話] Ollama {self.model} @ {self.url}  画像: "
+              f"{'見られる' if self.vision else '見られない'}")
+
+    @property
+    def vision(self):
+        return bool(self._caps) and "vision" in self._caps
+
+    def _post(self, path, body, timeout):
+        req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+
+    def _ask(self, text, image_jpeg):
+        if self._caps is None:
+            self._probe()
+        user = {"role": "user", "content": text}
+        if image_jpeg:
+            user["images"] = [base64.standard_b64encode(image_jpeg).decode()]
+        body = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": self.system}] + self.history + [user],
+            "stream": False,
+            "keep_alive": "30m",  # モデルを読みこんだままにして、次の返事を速くする
+            "options": {"num_predict": 200, "temperature": 0.7},
+        }
+        if self._caps and "thinking" in self._caps:
+            body["think"] = False  # 子どもとの会話では考えこまず、すぐ答える
+        try:
+            resp = self._post("/api/chat", body, self.timeout)
+        except urllib.error.HTTPError as e:
+            print(f"[会話] Ollama エラー {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}")
+            raise BrainError("sad", "ごめんね、うまく かんがえられなかった。")
+        except OSError as e:  # つながらない・時間切れ
+            print(f"[会話] Ollama ({self.url}) につながりません（{e}）")
+            raise BrainError("sad", "ごめんね、かんがえる コンピューターに つながらないみたい。")
+        emotion, answer = parse_reply(_THINK_RE.sub("", resp.get("message", {}).get("content", "")))
+        if any(w in answer for w in NG_WORDS):
+            print(f"[会話] 安全のため言いかえました: {answer}")
+            return SAFE_REPLY
         return emotion, answer
+
+
+def default_ollama_model(url):
+    """Pi の上で Pi 自身の Ollama を使うなら小さいモデル、それ以外は Mac 向けのモデル。"""
+    local = any(h in url for h in ("localhost", "127.0.0.1"))
+    try:
+        with open("/proc/device-tree/model", "rb") as f:
+            on_pi = b"Raspberry Pi" in f.read()
+    except OSError:
+        on_pi = False
+    return OLLAMA_MODEL_PI if (local and on_pi) else OLLAMA_MODEL_PC
+
+
+def make_brain(kind="ollama", model=None, name="ピコ", ollama_url=OLLAMA_URL):
+    if kind == "claude":
+        return ClaudeBrain(model or DEFAULT_MODEL, name)
+    return OllamaBrain(model or default_ollama_model(ollama_url), ollama_url, name)
 
 
 # ---------------------------------------------------------------- 話す
@@ -278,7 +418,9 @@ class Conversation:
         print(f"[聞こえた] {text}")
         self.events.put(("heard", 0))
         self.events.put(("think", 60))
-        image = self.get_image() if (self.get_image and wants_look(text)) else None
+        image = None
+        if self.get_image and wants_look(text) and self.brain.vision:
+            image = self.get_image()
         emotion, answer = self.brain.reply(text, image)
         print(f"[{emotion}] {answer}")
         self.events.put((emotion, 60))
@@ -309,7 +451,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="会話機能だけを試す")
     ap.add_argument("--text", action="store_true", help="マイクの代わりにキーボードで話す")
     ap.add_argument("--no-voice", action="store_true", help="声を出さない")
-    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--brain", choices=["ollama", "claude"], default="ollama")
+    ap.add_argument("--ollama-url", default=OLLAMA_URL)
+    ap.add_argument("--model", default=None)
     ap.add_argument("--name", default="ピコ")
     ap.add_argument("--vosk-model", default=DEFAULT_VOSK)
     ap.add_argument("--voice")
@@ -318,7 +462,8 @@ def main(argv=None):
 
     voice = None if args.no_voice else Voice(args.voice, pitch=args.pitch)
     ears = None if args.text else Ears(args.vosk_model)
-    conv = Conversation(Brain(args.model, args.name), voice, ears)
+    brain = make_brain(args.brain, args.model, args.name, args.ollama_url)
+    conv = Conversation(brain, voice, ears)
     if args.text:
         print("話しかけてください（終了は Ctrl+D）")
         try:

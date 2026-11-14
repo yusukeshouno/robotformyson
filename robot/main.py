@@ -59,7 +59,11 @@ def parse_args(argv=None):
     ap.add_argument("--udp", type=int, default=5005, help="感情タグ受信ポート（0で無効）")
     ap.add_argument("--talk", action="store_true", help="会話機能を使う")
     ap.add_argument("--name", default="ピコ", help="ロボットの名前")
-    ap.add_argument("--model", default=None, help="Claude のモデル")
+    ap.add_argument("--brain", choices=["ollama", "claude"], default="ollama",
+                    help="考える部分: ollama（無料・ローカル）か claude（有料）")
+    ap.add_argument("--ollama-url", default="http://localhost:11434",
+                    help="Ollama の場所（Mac で動かすなら http://<Macの名前>.local:11434）")
+    ap.add_argument("--model", default=None, help="使うモデル名")
     ap.add_argument("--vosk-model", default=None, help="音声認識モデルのフォルダ")
     ap.add_argument("--mic", default=None, help="マイクのデバイス名または番号")
     ap.add_argument("--voice", default=None, help="Open JTalk の声ファイル (.htsvoice)")
@@ -73,7 +77,7 @@ def start_conversation(args, tracker, last_face):
     """会話機能を起動する。準備が足りなければ理由を表示して顔だけで動く。"""
     try:
         from . import conversation as cv
-        brain = cv.Brain(args.model or cv.DEFAULT_MODEL, args.name)
+        brain = cv.make_brain(args.brain, args.model, args.name, args.ollama_url)
         voice = cv.Voice(args.voice, pitch=args.pitch)
         mic = int(args.mic) if args.mic and args.mic.isdigit() else args.mic
         ears = cv.Ears(args.vosk_model or cv.DEFAULT_VOSK, device=mic)
