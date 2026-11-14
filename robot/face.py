@@ -170,6 +170,12 @@ class Face:
         self.idle_gaze = [0.0, 0.0]
         self.external_gaze = None
         self.talk = 0.0  # 話しているときの口の開き 0..1
+        self.mood, self.mood_w = "neutral", 0.0  # 返事の余韻（ふだんの顔にうっすら混ぜる）
+        # 話し始めや話の途中で、ときどき相手から目をそらす（考えながら話している感じ）
+        self.avert_until = -1.0
+        self.avert_goal = (0.0, 0.0)
+        self.last_talk = -10.0        # 最後に口が動いていた時刻
+        self.next_talk_avert = 0.0
         self.next_saccade = 0.0
         self.next_blink = random.uniform(1.0, 3.0)
         self.blink_start = -1.0
@@ -188,15 +194,44 @@ class Face:
     def set_talk(self, level):
         self.talk = level
 
+    def set_mood(self, name, weight):
+        """ふだんの顔（neutral）に、name の表情を weight（0..1）だけ混ぜる。"""
+        self.mood = name if name in EMOTIONS else "neutral"
+        self.mood_w = max(0.0, min(1.0, weight))
+
     def look_at(self, target):
         """target: (x, y) を -1..1 で。None なら自由に視線を泳がせる。"""
         self.external_gaze = target
 
     # ---- 更新 ----
+    def _update_avert(self):
+        """話し始めに 1 秒ほど、長く話すときは数秒ごとに一瞬、目をそらす。
+        Andrist ら (HRI 2014) の会話での目そらしをもとにした、簡単な決まり。"""
+        speaking = self.talk > 0.05
+        if speaking:
+            if self.t - self.last_talk > 1.0:      # 新しく話し始めた
+                self._avert(random.uniform(0.8, 1.5))
+                self.next_talk_avert = self.t + random.uniform(4.0, 7.0)
+            elif self.t >= self.next_talk_avert and self.t >= self.avert_until:
+                self._avert(random.uniform(0.4, 0.7))
+                self.next_talk_avert = self.t + random.uniform(4.0, 7.0)
+            self.last_talk = self.t
+
+    def _avert(self, seconds):
+        side = random.choice((-1, 1))
+        self.avert_goal = (side * random.uniform(0.45, 0.65), -random.uniform(0.2, 0.45))
+        self.avert_until = self.t + seconds
+
     def update(self, dt):
         self.t += dt
         k = 1 - math.exp(-dt * 8)
         target = _target(self.emotion)
+        if self.emotion == "neutral" and self.mood != "neutral" and self.mood_w > 0:
+            m = _target(self.mood)  # 目の形や動きは neutral のまま、数値だけ寄せる
+            for key in _NUM_KEYS:
+                target[key] = _lerp(target[key], m[key], self.mood_w)
+            target["color"] = tuple(_lerp(a, b, self.mood_w)
+                                    for a, b in zip(target["color"], m["color"]))
         for key in _NUM_KEYS:
             self.params[key] = _lerp(self.params[key], target[key], k)
         self.params["color"] = tuple(
@@ -228,7 +263,8 @@ class Face:
         elif e == "confused":
             goal = (0.5 if (self.t // 1.4) % 2 else -0.5, -0.2)
         elif self.external_gaze is not None:
-            goal = self.external_gaze
+            self._update_avert()
+            goal = self.avert_goal if self.t < self.avert_until else self.external_gaze
         else:
             goal = self.idle_gaze
         kg = 1 - math.exp(-dt * 14)

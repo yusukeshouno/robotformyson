@@ -209,11 +209,13 @@ def main(argv=None):
                     engine.notice(now)
                 else:
                     engine.express(emo, dur, now)
+                    engine.set_mood(emo, now)
             talk += (conv.mouth_level() - talk) * 0.6
             face.set_talk(talk)
 
         emotion = engine.update(now)
         face.set_emotion(emotion)
+        face.set_mood(*engine.mood(now))
         face.look_at((max(-1, min(1, fx)), max(-1, min(1, fy))) if present else None)
         face.update(dt)
         face.draw(canvas)
