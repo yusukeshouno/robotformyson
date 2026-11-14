@@ -48,12 +48,53 @@ SYSTEM_PROMPT = """あなたは「{name}」という名前の、机の上にい�
 LOOK_WORDS = ("これ", "それ", "見て", "みて", "見える", "みえる", "だれ", "誰",
               "何色", "なにいろ", "持って", "もって")
 
-_TAG_RE = re.compile(r"^\s*\[(\w+)\]\s*")
+# [joy] のような感情タグ。小さなモデルは全角の［］【】や大文字で書くこともある
+_TAG_RE = re.compile(r"[\[［【]\s*([A-Za-z]+)\s*[\]］】]")
 _THINK_RE = re.compile(r"<think>.*?(</think>|$)", re.S)
+_SENTENCE_RE = re.compile(r"[^。！？!?]*[。！？!?]+|[^。！？!?]+$")
+MAX_SENTENCES = 2   # 声に出すのは最初の2文まで（長い返事は子どもが飽きてしまう）
+MAX_CHARS = 80
 
 # ローカルの小さなモデル向けの、最後の安全網（返事にこれが入っていたら言いかえる）
 NG_WORDS = ("死ね", "殺す", "ころす", "自殺", "しね", "セックス", "エロ", "麻薬", "爆弾")
+# NG_WORDS を含むが、ふつうの言葉（「むかしね」「イエロー」など）。先に取りのぞいてから調べる
+NG_OK_WORDS = ("むかしね", "おかしね", "たのしね", "うれしね", "かなしね", "さびしね", "ほしね",
+               "はなしね", "わたしね", "あしね", "どうしね", "しねん", "イエロー", "エロン")
 SAFE_REPLY = ("neutral", "うーん、べつの おはなし しよう！")
+
+
+def normalize(text):
+    """聞き取った文字をくらべやすくする（全角半角をそろえ、カタカナをひらがなに）。
+
+    音声認識は「ピコ」を「ぴこ」と書くこともあるので、名前や言葉の判定はこれを通してから行う。
+    """
+    text = unicodedata.normalize("NFKC", text).lower()
+    return "".join(chr(ord(ch) - 0x60) if "ァ" <= ch <= "ヶ" else ch for ch in text)
+
+
+def contains_any(text, words):
+    t = normalize(text)
+    return any(normalize(w) in t for w in words)
+
+
+def is_unsafe(text):
+    t = normalize(text)
+    for w in NG_OK_WORDS:
+        t = t.replace(normalize(w), "")
+    return any(normalize(w) in t for w in NG_WORDS)
+
+
+def shorten(text, max_sentences=MAX_SENTENCES, max_chars=MAX_CHARS):
+    """読み上げる長さに切りつめる（文の区切りで切る）。"""
+    out = ""
+    for s in _SENTENCE_RE.findall(text)[:max_sentences]:
+        if out and len(out) + len(s) > max_chars:
+            break
+        out += s
+    out = out.strip() or text
+    if len(out) > max_chars:  # 句点のない長い文
+        out = out[:max_chars].rstrip("、, ") + "…"
+    return out
 
 
 def clean_for_speech(text):
@@ -66,15 +107,20 @@ def clean_for_speech(text):
 
 
 def parse_reply(text):
-    """'[joy] やあ！' → ('joy', 'やあ！')。タグがなければ neutral。"""
-    m = _TAG_RE.match(text)
-    if m and m.group(1) in REPLY_EMOTIONS:
-        return m.group(1), text[m.end():].strip()
-    return "neutral", _TAG_RE.sub("", text).strip()
+    """'[joy] やあ！' → ('joy', 'やあ！')。タグがなければ neutral。
+
+    タグが先頭以外にあっても読み、どこにあっても読み上げる文からは取りのぞく。
+    """
+    emotion = "neutral"
+    for m in _TAG_RE.finditer(text):
+        if m.group(1).lower() in REPLY_EMOTIONS:
+            emotion = m.group(1).lower()
+            break
+    return emotion, _TAG_RE.sub("", text).strip()
 
 
 def wants_look(text):
-    return any(w in text for w in LOOK_WORDS)
+    return contains_any(text, LOOK_WORDS)
 
 
 # ---------------------------------------------------------------- 考える
@@ -108,7 +154,7 @@ class _BrainBase:
             if e.offline and self.fallback:
                 return self.fallback.reply(text)
             return e.emotion, e.answer
-        answer = clean_for_speech(answer)
+        answer = shorten(clean_for_speech(answer))
         if not answer:
             emotion, answer = "surprise", "えっと、もういっかい いって？"
         # 履歴は文字だけ残す（画像は毎回送り直さない）
@@ -246,7 +292,7 @@ class OllamaBrain(_BrainBase):
             raise BrainError("sad", "ごめんね、かんがえる コンピューターに つながらないみたい。",
                              offline=True)
         emotion, answer = parse_reply(_THINK_RE.sub("", resp.get("message", {}).get("content", "")))
-        if any(w in answer for w in NG_WORDS):
+        if is_unsafe(answer):
             print(f"[会話] 安全のため言いかえました: {answer}")
             return SAFE_REPLY
         return emotion, answer
@@ -292,7 +338,7 @@ class SimpleBrain:
 
     def reply(self, text, image_jpeg=None):
         for words, emotion, answers in self.RULES:
-            if any(w in text for w in words):
+            if contains_any(text, words):
                 return emotion, random.choice(answers).format(name=self.name)
         now = time.monotonic()
         if now - self.last_notice > self.NOTICE_EVERY:
@@ -467,7 +513,7 @@ class Conversation:
     def should_reply(self, text):
         if len(text) < 2:
             return False
-        if any(w in text for w in self.wake_words):
+        if contains_any(text, self.wake_words):
             return True
         if time.monotonic() - self.last_reply < self.FOLLOW_UP:
             return True
@@ -530,7 +576,9 @@ def main(argv=None):
         print("話しかけてください（終了は Ctrl+D）")
         try:
             while True:
-                conv.handle(input("> ").strip())
+                text = input("> ").strip()
+                if text:
+                    conv.handle(text)
         except (EOFError, KeyboardInterrupt):
             print()
     else:
