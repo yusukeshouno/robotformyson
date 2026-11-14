@@ -635,7 +635,7 @@ class Conversation:
         return (self.faces.person(pid) or {}).get("call") or name
 
     def _with_speaker(self, text):
-        if getattr(self.brain, "extra_system", None):  # 成長の記録が相手の名前を指示に入れている
+        if getattr(self.brain, "speaker_in_system", False):  # 成長の記録が相手の名前を指示に入れている
             return text
         call = self.who()
         return f"{text}（話しているのは {call}）" if call else text

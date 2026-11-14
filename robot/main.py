@@ -19,6 +19,7 @@ from .audio import add_audio_args
 from .emotion import EmotionEngine
 from .growth import Growth
 from .memory import Memory
+from . import personality
 from .face import BG, EMOTION_NAMES, Face
 
 
@@ -76,6 +77,8 @@ def parse_args(argv=None):
     ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
     add_audio_args(ap)
     ap.add_argument("--no-growth", action="store_true", help="成長の記録をしない")
+    ap.add_argument("--personality", choices=personality.MODES, default="curious",
+                    help="curious=好奇心いっぱいの年下の友達 / plain=前と同じ / weekly=週ごとに入れかえて比べる")
     ap.add_argument("--no-memory", action="store_true",
                     help="前に話したことをおぼえない（小さい子には無い方が楽しいこともある）")
     ap.add_argument("--debug", action="store_true")
@@ -109,13 +112,16 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
     try:
         from . import conversation as cv
         brain = cv.make_brain(args.brain, args.model, args.name, args.ollama_url)
-        hints = []
+        hints = [lambda: personality.hint(args.personality)]  # 好奇心・まちがえても大丈夫
+        print(f"性格: {'好奇心いっぱい' if personality.is_curious(args.personality) else 'ふつう'}"
+              f"（--personality {args.personality}）")
         if growth:  # なかよしになるほど話し方が変わる
             hints.append(growth.prompt_hint)
+            brain.speaker_in_system = True
         if memory:  # 前に話したこと。まとめは家の中の Ollama だけ（Claude には送らない）
             hints.append(memory.prompt_hint)
             memory.summarize = getattr(brain, "summarize", None)
-        if hints:
+        if hasattr(brain, "extra_system"):
             brain.extra_system = lambda: "\n".join(h for h in (f() for f in hints) if h)
         audio = cv.AudioSettings.load(args.mic, args.speaker, args.echo_tail)
         mic, speaker = audio.resolve()

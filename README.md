@@ -274,6 +274,21 @@ python3 -m robot.growth report   # 家族向け：この1週間のまとめ
 python3 -m robot.growth reset    # 記録を消して最初から
 ```
 
+## 性格（好奇心いっぱいの年下の友達）
+
+ふだんのピコは、好奇心いっぱいの「少し年下の友達」です。「なんでかな？」と一緒にふしぎがり、
+しりとりやなぞなぞでは ときどき まちがえて「もういっかい やってみる！」と明るくやり直します。
+がんばったら、結果より やり方をほめます。本当のこと（生きもの・からだ・あぶないこと）は
+わざとまちがえず、自信がないときは「おうちの人にも聞いてみよう」とさそいます。
+
+```bash
+python3 -m robot.main --talk --personality curious   # ふつうはこれ（省略可）
+python3 -m robot.main --talk --personality plain     # 性格の指示なし（前と同じ）
+python3 -m robot.main --talk --personality weekly    # 週ごとに入れかえて比べる（偶数週が curious）
+```
+
+`weekly` のときは、`python3 -m robot.growth report` の週ごとの遊んだ回数を見比べると、性格のちがいがわかります。
+
 ## 前に話したことをおぼえる（記憶）
 
 顔をおぼえた人と話すと、会話が一区切りしたとき（1分話さない・相手が入れかわった）に、
@@ -320,6 +335,7 @@ echo "joy 3" | nc -u -w0 127.0.0.1 5005
 | `tools/setup_audio.sh` / `deploy/pipewire/` | PipeWire のエコー除去の設定 |
 | `tools/snapshot.py` | 全表情を1枚の画像に書き出す（確認用） |
 | `robot/faces.py` | 家族の顔をおぼえて見分ける・あいさつ・声での登録 |
+| `robot/personality.py` | 好奇心いっぱいで まちがえても大丈夫を見せる性格 |
 | `robot/memory.py` | 前に話したことを人ごとにおぼえる（家の中だけに保存） |
 | `tests/` | 会話・音声・成長・顔をおぼえる・記憶のテスト |
 

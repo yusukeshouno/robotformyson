@@ -375,6 +375,7 @@ def test_conversation_leaves_name_to_growth_hint(db, rec):
     arrive(rec, 1, 0)
     brain = RecordingBrain()
     brain.extra_system = lambda: "今話している相手は「ゆうと」です。"
+    brain.speaker_in_system = True  # 成長の指示が名前を伝えている
     cv.Conversation(brain, faces=rec).handle("こんにちは")
     assert brain.heard == ["こんにちは"]           # 名前を二重に伝えない
 
