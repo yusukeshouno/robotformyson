@@ -27,6 +27,9 @@ import wave
 
 import numpy as np
 
+from .audio import (AudioSettings, MicGate, add_audio_args, output_channels, resolve_device,
+                    to_channels)
+
 DEFAULT_MODEL = "claude-opus-5-5"            # Claude を使うとき
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "gemma4:12b"                   # Mac mini など（画像も見られる）
@@ -373,7 +376,7 @@ def _first_existing(paths):
 class Voice:
     """Open JTalk で読み上げ、再生中の音量を口の動きに使う。"""
 
-    def __init__(self, voice=None, pitch=2.0, speed=1.0, play=True):
+    def __init__(self, voice=None, pitch=2.0, speed=1.0, play=True, device=None):
         self.bin = shutil.which("open_jtalk")
         if not self.bin:
             raise RuntimeError("open_jtalk がありません（sudo apt install open-jtalk ...）")
@@ -386,6 +389,8 @@ class Voice:
         if not (self.dic and self.voice):
             raise RuntimeError("Open JTalk の辞書か声のファイルが見つかりません")
         self.pitch, self.speed, self.play = pitch, speed, play
+        self.device = device      # None はシステム標準（setup_audio.sh 後はエコー除去の出口）
+        self._channels = None
         self._env, self._start, self._fps = None, 0.0, 30
 
     def synth(self, text):
@@ -417,7 +422,9 @@ class Voice:
         try:
             if self.play:
                 import sounddevice as sd
-                sd.play(data, rate)
+                if self._channels is None:
+                    self._channels = output_channels(self.device)
+                sd.play(to_channels(data, self._channels), rate, device=self.device)
                 sd.wait()
             else:
                 time.sleep(len(data) / rate)
@@ -436,51 +443,73 @@ class Voice:
 
 # ---------------------------------------------------------------- 聞く
 class Ears:
-    """マイクの音を Vosk で文字にする。話している間は聞かない（自分の声を拾わないため）。"""
+    """マイクの音を Vosk で文字にする。
 
-    def __init__(self, model_path=DEFAULT_VOSK, device=None, rate=None):
-        from vosk import KaldiRecognizer, Model, SetLogLevel
-        SetLogLevel(-1)
-        if not os.path.isdir(model_path):
-            raise RuntimeError(f"音声認識モデルがありません: {model_path}（README 参照）")
+    ロボットが話している間（と話し終えて少しの間）は gate が閉じ、その間の音と、
+    閉じる前に録りかけていた言葉の切れ端は捨てる（自分の声を拾わないため）。
+    """
+
+    def __init__(self, model_path=DEFAULT_VOSK, device=None, rate=None, gate=None,
+                 recognizer=None):
         self.device = device
-        if rate is None:
-            import sounddevice as sd
-            rate = int(sd.query_devices(device, "input")["default_samplerate"])
-        self.rate = rate
-        self.rec = KaldiRecognizer(Model(model_path), rate)
+        self.gate = gate or MicGate()
+        if recognizer is None:
+            from vosk import KaldiRecognizer, Model, SetLogLevel
+            SetLogLevel(-1)
+            if not os.path.isdir(model_path):
+                raise RuntimeError(f"音声認識モデルがありません: {model_path}（README 参照）")
+            if rate is None:
+                import sounddevice as sd
+                rate = int(sd.query_devices(device, "input")["default_samplerate"])
+            recognizer = KaldiRecognizer(Model(model_path), rate)
+        self.rate = rate or 16000
+        self.rec = recognizer
         self.q = queue.Queue()
-        self.muted = threading.Event()
-
-    def accept(self, pcm_bytes):
-        """音声データを渡す。一区切りの発話が終わったら文字を返す。"""
-        if self.rec.AcceptWaveform(pcm_bytes):
-            return json.loads(self.rec.Result()).get("text", "").replace(" ", "")
-        return None
+        self._epoch = self.gate.epoch
 
     def mute(self, on):
+        """on=True で閉じる。False で開く（実際に聞きはじめるのは余韻の時間のあと）。"""
         if on:
-            self.muted.set()
+            self.gate.close()
         else:
-            while not self.q.empty():
-                self.q.get_nowait()
+            self.gate.open()
+
+    def on_audio(self, pcm_bytes):
+        """録音スレッドから呼ばれる。閉じている間の音は捨てる。"""
+        if self.gate.is_open():
+            self.q.put((self.gate.epoch, pcm_bytes))
+
+    def process(self, item):
+        """録った音を1つ認識器に渡す。一区切りの発話が終わったら文字を返す。"""
+        epoch, pcm_bytes = item
+        if epoch != self.gate.epoch or not self.gate.is_open():
+            return None                       # 話す前に録った音・話している間の音
+        if epoch != self._epoch:              # 話したあと最初の音: 途中経過を捨てる
             self.rec.Reset()
-            self.muted.clear()
+            self._epoch = epoch
+        if self.rec.AcceptWaveform(pcm_bytes):
+            text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
+            if text and self.gate.is_open() and self.gate.epoch == epoch:
+                return text
+        return None
+
+    def accept(self, pcm_bytes):
+        """（互換用）今の状態で音を1つ渡す。"""
+        return self.process((self.gate.epoch, pcm_bytes))
 
     def listen(self):
         """発話ごとに文字を返すジェネレーター。"""
         import sounddevice as sd
 
         def callback(indata, frames, t, status):
-            if not self.muted.is_set():
-                self.q.put(bytes(indata))
+            self.on_audio(bytes(indata))
 
         with sd.RawInputStream(samplerate=self.rate, blocksize=int(self.rate * 0.1),
                                device=self.device, dtype="int16", channels=1,
                                callback=callback):
             while True:
-                text = self.accept(self.q.get())
-                if text and not self.muted.is_set():
+                text = self.process(self.q.get())
+                if text:
                     yield text
 
 
@@ -533,13 +562,13 @@ class Conversation:
         print(f"[{emotion}] {answer}")
         self.events.put((emotion, 60))
         if self.voice:
+            # 話している間はマイクを閉じる。開くのは、話し終えて余韻の時間がたってから
             if self.ears:
                 self.ears.mute(True)
             try:
                 self.voice.speak(answer)
             finally:
                 if self.ears:
-                    time.sleep(0.3)  # 残響を拾わないよう少し待つ
                     self.ears.mute(False)
         self.events.put((emotion, 1.5))
         self.last_reply = time.monotonic()
@@ -566,10 +595,17 @@ def main(argv=None):
     ap.add_argument("--vosk-model", default=DEFAULT_VOSK)
     ap.add_argument("--voice")
     ap.add_argument("--pitch", type=float, default=2.0)
+    add_audio_args(ap)
     args = ap.parse_args(argv)
 
-    voice = None if args.no_voice else Voice(args.voice, pitch=args.pitch)
-    ears = None if args.text else Ears(args.vosk_model)
+    audio = AudioSettings.load(args.mic, args.speaker, args.echo_tail)
+    voice = ears = None
+    if not args.no_voice:
+        voice = Voice(args.voice, pitch=args.pitch,
+                      device=resolve_device(audio.speaker, "output"))
+    if not args.text:
+        ears = Ears(args.vosk_model, device=resolve_device(audio.mic, "input"),
+                    gate=MicGate(audio.echo_tail))
     brain = make_brain(args.brain, args.model, args.name, args.ollama_url)
     conv = Conversation(brain, voice, ears)
     if args.text:
