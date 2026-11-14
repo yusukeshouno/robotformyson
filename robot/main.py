@@ -61,6 +61,8 @@ def parse_args(argv=None):
                     help="目が人と逆を向くときに指定")
     ap.add_argument("--udp", type=int, default=5005, help="感情タグ受信ポート（0で無効）")
     ap.add_argument("--talk", action="store_true", help="会話機能を使う")
+    ap.add_argument("--no-faces", action="store_true",
+                    help="家族の顔を見分ける機能を使わない")
     ap.add_argument("--name", default="ピコ", help="ロボットの名前")
     ap.add_argument("--brain", choices=["ollama", "claude", "simple"], default="ollama",
                     help="考える部分: ollama（無料・Mac など）/ claude（有料）/ simple（決まった受け答えだけ）")
@@ -83,7 +85,21 @@ def screen_to_face(x, y, rotate):
     return x, y
 
 
-def start_conversation(args, tracker, last_face):
+def start_faces(args, tracker):
+    """家族の顔を見分ける機能を起動する。モデルがなければ使わずに動く。"""
+    if not tracker or args.no_faces:
+        return None, None
+    try:
+        from .faces import Embedder, FaceDB, FaceRecognizer, Greeter
+        faces = FaceRecognizer(FaceDB(), Embedder()).start(tracker.latest)
+    except Exception as e:
+        print(f"顔を見分ける機能を使わずに起動します（{e}）")
+        return None, None
+    print(f"顔をおぼえる: {len(faces.db.people)}人 登録ずみ")
+    return faces, Greeter(faces)
+
+
+def start_conversation(args, tracker, last_face, faces=None):
     """会話機能を起動する。準備が足りなければ理由を表示して顔だけで動く。"""
     try:
         from . import conversation as cv
@@ -100,7 +116,8 @@ def start_conversation(args, tracker, last_face):
     if tracker:  # カメラがあれば、顔が見えている（10秒以内）ときだけ返事する
         attended = lambda: time.monotonic() - last_face[0] < 10.0  # noqa: E731
     conv = cv.Conversation(brain, voice, ears, get_image=tracker.jpeg if tracker else None,
-                           is_attended=attended, wake_words=(args.name,)).start()
+                           is_attended=attended, wake_words=(args.name,),
+                           faces=faces).start()
     print("会話機能: 起動しました")
     return conv
 
@@ -134,6 +151,8 @@ def main(argv=None):
         except Exception as e:  # カメラがなくても顔だけは動かす
             print(f"カメラを使わずに起動します（{e}）")
 
+    faces, greeter = start_faces(args, tracker)
+
     listener = None
     if args.udp:
         try:
@@ -144,7 +163,7 @@ def main(argv=None):
     last_face = [0.0]
     conv = None
     if args.talk:
-        conv = start_conversation(args, tracker, last_face)
+        conv = start_conversation(args, tracker, last_face, faces)
 
     show_cam, debug = False, args.debug
     talk = 0.0
@@ -198,6 +217,13 @@ def main(argv=None):
         if listener:
             for emo, dur in listener.poll():
                 engine.express(emo, dur, now)
+        if greeter:  # 家族が来たら、名前を呼んであいさつ
+            for emo, text in greeter.poll():
+                engine.express(emo if emo in EMOTION_NAMES else "joy", 3.0, now)
+                if conv:
+                    conv.say(text)
+                else:
+                    print(f"[あいさつ] {text}")
         if conv:
             for emo, dur in conv.poll():
                 if emo == "heard":
@@ -222,6 +248,8 @@ def main(argv=None):
                     surf, (w, w * img.shape[0] // img.shape[1])), (8, 8))
         if debug:
             label = f"{emotion}  face={'yes' if present else 'no'}  {clock.get_fps():.0f}fps"
+            if faces:
+                label += f"  who={faces.current()[0] or '-'}"  # 日本語は既定のフォントで出ないので id
             canvas.blit(font.render(label, True, (200, 200, 200)), (8, S - font.get_height() - 8))
 
         screen.fill(BG)
@@ -229,6 +257,8 @@ def main(argv=None):
                     if args.screen_rotate else canvas, offset)
         pygame.display.flip()
 
+    if faces:
+        faces.stop()
     if tracker:
         tracker.stop()
     pygame.quit()
