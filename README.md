@@ -13,6 +13,33 @@ Raspberry Pi 4 ＋小型正方形ディスプレイ＋カメラで動く、エ�
 - 「これなに？」と聞くと、カメラの画像を見て答える
 - UDP で感情タグを受け付ける（外部プログラムとの連携口）
 
+## 機材
+
+| 役割 | 部品 | 状態 |
+|---|---|---|
+| 頭脳 | Raspberry Pi 4 Model B | 手元にある |
+| 顔 | Pimoroni HyperPixel 4.0 Square（XP 版・720×720） | 手元にある |
+| 会話の頭脳 | Mac mini（Ollama） | 手元にある |
+| 目 | Raspberry Pi Camera Module 3 Wide | 用意する |
+| 耳と口 | USB スピーカーフォン（エコーキャンセル付き） | 用意する |
+| 電源・記憶 | Pi 4 用 5V 3A USB-C 電源、microSD 32GB 以上 | 用意する（手持ちがあれば不要） |
+
+- HyperPixel は GPIO ピンをすべて使いますが、カメラは専用のカメラ端子、音声は USB なので、ピンは足りなくなりません。
+- HyperPixel を上にかぶせると、Pi 4 の上に大きなファンを付けられません。CPU が熱くなりやすいので、薄型のヒートシンクを貼るか、ケースに空気の通り道を作ってください。
+- カメラのケーブル（フラットケーブル）は、HyperPixel と Pi の間を通して横から出します。
+
+## HyperPixel 4.0 Square の設定
+
+`/boot/firmware/config.txt` の最後に1行足して、再起動します（XP 版は OS 標準のドライバーで動きます）。
+
+```
+dtoverlay=vc4-kms-dpi-hyperpixel4sq
+```
+
+- Pimoroni の説明では、I2C と SPI は無効にしておく必要があります（`sudo raspi-config` → Interface Options。初期状態は無効です）。
+- 正方形版は OS 側の画面回転にうまく対応していないため、向きはロボット側で `--screen-rotate 90`（または 180, 270）を付けて合わせます。
+- タッチ対応版なら、画面のタップ・なでるがそのまま使えます。
+
 ## Raspberry Pi で動かす
 
 Raspberry Pi OS（Bookworm）を想定しています。

@@ -52,6 +52,8 @@ def parse_args(argv=None):
     ap.add_argument("--no-camera", action="store_true")
     ap.add_argument("--camera", choices=["auto", "picamera", "opencv"], default="auto")
     ap.add_argument("--camera-index", type=int, default=0)
+    ap.add_argument("--screen-rotate", type=int, choices=[0, 90, 180, 270], default=0,
+                    help="画面の回転（時計回り）。ケースに入れた向きに合わせる")
     ap.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
                     help="カメラの取り付け向きの補正")
     ap.add_argument("--no-mirror", action="store_true",
@@ -71,6 +73,13 @@ def parse_args(argv=None):
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--run-seconds", type=float, default=0, help=argparse.SUPPRESS)
     return ap.parse_args(argv)
+
+
+def screen_to_face(x, y, rotate):
+    """画面上の座標(-1..1)を、回転前の顔の座標に戻す。"""
+    for _ in range(rotate // 90):
+        x, y = y, -x
+    return x, y
 
 
 def start_conversation(args, tracker, last_face):
@@ -177,8 +186,8 @@ def main(argv=None):
             fx, fy = fx * 1.3, fy * 1.3
         elif args.mouse and pygame.mouse.get_focused():
             mx, my = pygame.mouse.get_pos()
-            fx = (mx - offset[0]) / S * 2 - 1
-            fy = (my - offset[1]) / S * 2 - 1
+            fx, fy = screen_to_face((mx - offset[0]) / S * 2 - 1,
+                                    (my - offset[1]) / S * 2 - 1, args.screen_rotate)
             present = abs(fx) <= 1 and abs(fy) <= 1
         if present:
             last_face[0] = now
@@ -213,7 +222,8 @@ def main(argv=None):
             canvas.blit(font.render(label, True, (200, 200, 200)), (8, S - font.get_height() - 8))
 
         screen.fill(BG)
-        screen.blit(canvas, offset)
+        screen.blit(pygame.transform.rotate(canvas, -args.screen_rotate)
+                    if args.screen_rotate else canvas, offset)
         pygame.display.flip()
 
     if tracker:
