@@ -6,7 +6,7 @@
 
     python3 -m robot.main --talk       # 会話機能つき（README の準備が必要）
 
-キー: 1-8 感情を出す / 0 自動に戻す / c カメラ映像 / d デバッグ表示 / q・Esc 終了
+キー: 1-9 感情を出す / ←→ 全部の表情を順に出す / 0 自動に戻す / c カメラ映像 / d デバッグ表示 / q・Esc 終了
 画面クリック(タップ)で喜ぶ、連打で怒る、なでる(ドラッグ)と照れる。
 """
 import argparse
@@ -147,6 +147,7 @@ def main(argv=None):
         conv = start_conversation(args, tracker, last_face)
 
     show_cam, debug = False, args.debug
+    shown = 0  # ←→ キーで出している表情の番号
     talk = 0.0
     drag, start = None, time.monotonic()
     clock = pygame.time.Clock()
@@ -163,8 +164,12 @@ def main(argv=None):
             elif ev.type == pygame.KEYDOWN:
                 if ev.key in (pygame.K_ESCAPE, pygame.K_q):
                     running = False
-                elif pygame.K_1 <= ev.key <= pygame.K_8:
+                elif pygame.K_1 <= ev.key <= pygame.K_9:
                     engine.express(EMOTION_NAMES[ev.key - pygame.K_1], 4.0, now)
+                elif ev.key in (pygame.K_RIGHT, pygame.K_LEFT):
+                    step = 1 if ev.key == pygame.K_RIGHT else -1
+                    shown = (shown + step) % len(EMOTION_NAMES)
+                    engine.express(EMOTION_NAMES[shown], 4.0, now)
                 elif ev.key == pygame.K_0:
                     engine.express("neutral", 0.0, now)
                 elif ev.key == pygame.K_c:
