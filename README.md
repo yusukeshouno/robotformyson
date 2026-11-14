@@ -21,10 +21,11 @@ Raspberry Pi 4 ＋小型正方形ディスプレイ＋カメラで動く、エ�
 | 顔 | Pimoroni HyperPixel 4.0 Square（XP 版・720×720） | 手元にある |
 | 会話の頭脳 | Mac mini（Ollama） | 手元にある |
 | 目 | Raspberry Pi Camera Module 3 Wide | 用意する |
-| 耳と口 | USB スピーカーフォン（エコーキャンセル付き） | 用意する |
+| 耳 | SunFounder USB ミニマイク | 注文済み |
+| 口 | Pi の 3.5mm 出力 → PAM8403 アンプ基板（USB 5V 給電）→ 3W 4Ω スピーカー ×2 | 注文済み |
 | 電源・記憶 | Pi 4 用 5V 3A USB-C 電源、microSD 32GB 以上 | 用意する（手持ちがあれば不要） |
 
-- HyperPixel は GPIO ピンをすべて使いますが、カメラは専用のカメラ端子、音声は USB なので、ピンは足りなくなりません。
+- HyperPixel は GPIO ピンをすべて使いますが、カメラは専用のカメラ端子、マイクは USB、スピーカーは 3.5mm 端子なので、ピンは足りなくなりません。
 - HyperPixel を上にかぶせると、Pi 4 の上に大きなファンを付けられません。CPU が熱くなりやすいので、薄型のヒートシンクを貼るか、ケースに空気の通り道を作ってください。
 - カメラのケーブル（フラットケーブル）は、HyperPixel と Pi の間を通して横から出します。
 
@@ -126,8 +127,45 @@ python3 -m robot.main --fullscreen --talk --brain claude
 
 - **いつ返事をするか：** カメラに顔が見えているとき（10秒以内）か、名前（標準は「ピコ」）を呼ばれたときです。名前はひらがな・カタカナどちらで聞き取っても反応します。返事のあと15秒は、続けて話しかけられます。テレビの音などに反応しすぎないためです。
 - **名前と声：** `--name ロボ` で名前、`--pitch 3` で声の高さを変えられます。もっとかわいい声にしたいときは、MMDAgent の「mei」の声ファイルを `/usr/share/hts-voice/mei/` に置くと自動で使います（`--voice` でファイルを指定することもできます）。
-- **マイクが違うとき：** `python3 -m sounddevice` で一覧を出し、`--mic 番号` で指定します。
+- **マイク・スピーカーを変えるとき：** 下の「声の入り口と出口」を見てください。
 - **会話だけ試す：** `python3 -m robot.conversation --text --ollama-url http://macmini.local:11434` で、キーボードから話しかけられます（マイク不要。Mac の上で直接動かしても試せます）。
+
+### 声の入り口と出口（エコー除去）
+
+高いエコー除去基板は使わず、ソフトで2段構えにしています。
+
+1. **PipeWire の WebRTC エコー除去**：スピーカーから出た音をマイクの音から引く。
+2. **話している間はマイクを止める**：ロボットが話している間と、話し終えてから 0.6 秒は、マイクの音を捨てます。話しはじめる前に聞きかけていた言葉の切れ端も捨てます。ソフトのエコー除去は完全ではないので、自分の声に返事をしてしまわないための保険です。そのかわり、ロボットが話している途中で割りこんで話しかけることはできません。
+
+機材がそろったら、Pi で1回だけ実行します（Raspberry Pi OS Bookworm のデスクトップ版を想定）:
+
+```bash
+bash tools/setup_audio.sh --dry-run   # 見つけたマイク・スピーカーと、作る設定を表示するだけ
+bash tools/setup_audio.sh             # 設定して、エコー除去したマイク・スピーカーを標準にする
+python3 -m robot.audio check          # 音を鳴らしながら録音して、回り込みの大きさを測る
+```
+
+- USB マイクは名前に「usb」、3.5mm 出力は「bcm2835」を含むものを選びます。ちがうときは `wpctl status` で名前を見て、`MIC_MATCH=pnp SPEAKER_MATCH=headphones bash tools/setup_audio.sh` のように指定します。
+- 元に戻すときは `bash tools/setup_audio.sh --undo` です。
+- 3.5mm から音が出ないときは、`/boot/firmware/config.txt` に `dtparam=audio=on` があるか確認してください。
+- PAM8403 は小さな音でもよく増幅するので、Pi 側の音量は 70% くらいから試してください（`wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.7`）。サーというノイズが気になるときは、アンプの電源を Pi の USB ではなく別の USB 充電器からとると減ることがあります。
+- マイクはスピーカーからなるべく離し、スピーカーの正面に向けないようにすると、エコー除去がよく効きます。
+
+ロボットは何も指定しなければシステム標準（設定後はエコー除去済み）を使います。別のデバイスを使うときは、名前の一部か番号で指定します。
+
+```bash
+python3 -m robot.audio list                                   # 一覧
+python3 -m robot.main --talk --mic USB --speaker Headphones   # 引数で
+ROBOT_MIC=USB ROBOT_SPEAKER=Headphones python3 -m robot.main --talk   # 環境変数で
+```
+
+| 設定 | 引数 | 環境変数 | 標準 |
+|---|---|---|---|
+| マイク | `--mic` | `ROBOT_MIC` | システム標準 |
+| スピーカー | `--speaker` | `ROBOT_SPEAKER` | システム標準 |
+| 話し終えてからマイクを戻すまで（秒） | `--echo-tail` | `ROBOT_ECHO_TAIL` | 0.6 |
+
+自分の声の終わりに返事をしてしまうときは `--echo-tail 1.0` のように長くし、返事のあとすぐ話しかけても聞きのがすときは短くします。
 
 ### 子ども向けの安全とプライバシー
 
@@ -176,6 +214,8 @@ echo "joy 3" | nc -u -w0 127.0.0.1 5005
 | `robot/vision.py` | カメラと顔検出（別スレッド） |
 | `robot/conversation.py` | 会話：聞く（Vosk）・考える（Ollama / Claude）・話す（Open JTalk） |
 | `robot/main.py` | 起動・入力処理・画面更新 |
+| `robot/audio.py` | マイク・スピーカーの選択、話している間マイクを止める仕組み、音の回り込みチェック |
+| `tools/setup_audio.sh` / `deploy/pipewire/` | PipeWire のエコー除去の設定 |
 | `tools/snapshot.py` | 全表情を1枚の画像に書き出す（確認用） |
 | `tests/` | 会話機能のテスト |
 

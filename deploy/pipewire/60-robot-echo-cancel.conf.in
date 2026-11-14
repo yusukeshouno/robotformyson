@@ -1,0 +1,48 @@
+# ロボット用のエコー除去（WebRTC）。tools/setup_audio.sh がノード名を埋めて
+# ~/.config/pipewire/pipewire.conf.d/60-robot-echo-cancel.conf に置く。
+#
+#   USB マイク (@MIC_NODE@)
+#        └─▶ [エコー除去] ─▶ @AEC_SOURCE@   … 音声認識はここから聞く
+#   @AEC_SINK@ ─▶ [エコー除去の参照] ─▶ 3.5mm 出力 (@SPEAKER_NODE@)
+#        ▲ 読み上げはここへ出す
+#
+# Pi の負担を減らすため、モノラル・48kHz で処理する（スピーカー2個には同じ音が出る）。
+context.modules = [
+    {   name = libpipewire-module-echo-cancel
+        args = {
+            library.name  = aec/libspa-aec-webrtc
+            monitor.mode  = false
+            audio.rate    = 48000
+            audio.channels = 1
+            audio.position = [ MONO ]
+            node.latency  = 1024/48000
+            aec.args = {
+                webrtc.extended_filter  = true    # 小さな箱の中の、長めの回り込みにも対応
+                webrtc.delay_agnostic   = true    # 3.5mm 出力の遅れが一定でなくても合わせる
+                webrtc.high_pass_filter = true
+                webrtc.noise_suppression = true
+                webrtc.gain_control     = false   # 自動音量は声が揺れて認識が落ちることがある
+            }
+            capture.props = {
+                node.name      = "robot_aec_capture"
+                target.object  = "@MIC_NODE@"
+                node.target    = "@MIC_NODE@"
+                node.passive   = true
+            }
+            source.props = {
+                node.name        = "@AEC_SOURCE@"
+                node.description = "Robot mic (echo cancelled)"
+            }
+            sink.props = {
+                node.name        = "@AEC_SINK@"
+                node.description = "Robot speaker (echo cancelled)"
+            }
+            playback.props = {
+                node.name      = "robot_aec_playback"
+                target.object  = "@SPEAKER_NODE@"
+                node.target    = "@SPEAKER_NODE@"
+                node.passive   = true
+            }
+        }
+    }
+]

@@ -15,6 +15,7 @@ import time
 
 import pygame
 
+from .audio import add_audio_args
 from .emotion import EmotionEngine
 from .face import BG, EMOTION_NAMES, Face
 
@@ -67,9 +68,9 @@ def parse_args(argv=None):
                     help="Ollama の場所（Mac で動かすなら http://<Macの名前>.local:11434）")
     ap.add_argument("--model", default=None, help="使うモデル名")
     ap.add_argument("--vosk-model", default=None, help="音声認識モデルのフォルダ")
-    ap.add_argument("--mic", default=None, help="マイクのデバイス名または番号")
     ap.add_argument("--voice", default=None, help="Open JTalk の声ファイル (.htsvoice)")
     ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
+    add_audio_args(ap)
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--run-seconds", type=float, default=0, help=argparse.SUPPRESS)
     return ap.parse_args(argv)
@@ -87,9 +88,11 @@ def start_conversation(args, tracker, last_face):
     try:
         from . import conversation as cv
         brain = cv.make_brain(args.brain, args.model, args.name, args.ollama_url)
-        voice = cv.Voice(args.voice, pitch=args.pitch)
-        mic = int(args.mic) if args.mic and args.mic.isdigit() else args.mic
-        ears = cv.Ears(args.vosk_model or cv.DEFAULT_VOSK, device=mic)
+        audio = cv.AudioSettings.load(args.mic, args.speaker, args.echo_tail)
+        mic, speaker = audio.resolve()
+        voice = cv.Voice(args.voice, pitch=args.pitch, device=speaker)
+        ears = cv.Ears(args.vosk_model or cv.DEFAULT_VOSK, device=mic,
+                       gate=cv.MicGate(audio.echo_tail))
     except Exception as e:
         print(f"会話機能を使わずに起動します（{e}）")
         return None
