@@ -3,7 +3,8 @@
 - 植物の形は人ごとに決まっている（同じ人ならいつも同じ形）。なかよし度がたまるほど伸びる。
 - レベル2で葉、レベル4でつぼみ、レベル5で花。レベル5のあとも少しずつ大きくなる。
 - 今いっしょにいる人の植物が明るくなり、レベル5ならまわりに光の粒が飛ぶ。
-- 縦長の画面では顔の上に空（昼・夕方・夜で変わる）、下に地面。背の高い植物は顔のうしろにうっすら見える。
+- 顔の上に空（昼・夕方・夜で変わる）、下に地面。正方形の画面では眉より上のすきまが空になる。
+  背の高い植物は顔のうしろにうっすら見える（花は弱めない）。
 
 成長の記録（growth.json）を読むだけで、新しく保存するものはない。
 
@@ -20,6 +21,8 @@ from .face import N
 from .growth import FAMILY, LEVELS, level_for
 
 MAX_PLANTS = 4
+SQUARE_SKY = 7         # 正方形の画面で空にする上の行数
+SQUARE_PLANT_TOP = 14  # 正方形の画面で植物がのびる上の限り（口のあたりまで）
 # なかよし度 → 植物がどこまで伸びたか（全体を 1 として）。レベルの変わり目で区切る
 GROW_POINTS = [need for need, _ in LEVELS] + [LEVELS[-1][0] + 600]
 GROW_FRAC = [0.06, 0.15, 0.3, 0.5, 0.7, 1.0]
@@ -100,6 +103,9 @@ class Garden:
         """rows: 画面の行数（ドット）、top: 顔の上の帯の行数。"""
         self.growth = growth
         self.rows, self.top = rows, top
+        self.tall = top >= 8
+        # 空の行数。縦長なら顔の上の帯ぜんぶ、正方形なら顔の上のすきま（眉より上）
+        self.sky_rows = top if self.tall else SQUARE_SKY
         self.ground = rows - 1
         self.clock = clock
         self.plants = {}     # 人の id → Plant
@@ -108,6 +114,7 @@ class Garden:
         self.t = 0.0
         self._sky_key, self._sky = None, None
         self.keep = None
+        self._grass = None
 
     # ---- だれの植物を植えるか ----
     def _people(self):
@@ -131,7 +138,7 @@ class Garden:
             seed = zlib.crc32(pid.encode("utf-8"))
             p = old.get(pid)
             if p is None or p.x0 != x0:
-                p = Plant(seed, x0, self.ground, 6 if self.top < 8 else 18)
+                p = Plant(seed, x0, self.ground, top=18 if self.tall else SQUARE_PLANT_TOP)
             self.plants[pid] = p
         self.order = order
 
@@ -210,21 +217,24 @@ class Garden:
         if key != self._sky_key:
             self._sky_key = key
             sky = np.zeros((self.rows, N, 3), np.float32)
-            if self.top >= 8:
-                hi, lo, a = SKY[key]
-                f = np.linspace(0, 1, self.top, dtype=np.float32)[:, None, None]
-                sky[:self.top] = (np.array(hi) + (np.array(lo) - np.array(hi)) * f) * a
-                if key == "day":    # おひさま
-                    yy, xx = np.mgrid[0:self.top, 0:N]
-                    sky[:self.top][(xx - 8) ** 2 + (yy - 5) ** 2 <= 5] = (255, 230, 140)
-                elif key == "night":  # おつきさま
-                    for u, v in ((0, 0), (1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)):
-                        sky[4 + v, 40 + u] = (255, 240, 190)
+            h = self.sky_rows
+            hi, lo, a = SKY[key]
+            f = np.linspace(0, 1, h, dtype=np.float32)[:, None, None]
+            sky[:h] = (np.array(hi) + (np.array(lo) - np.array(hi)) * f) * a
+            if not self.tall:  # 正方形の画面：顔のおでこに向かって空をうすくする
+                sky[:h] *= np.linspace(1.0, 0.25, h, dtype=np.float32)[:, None, None]
+            cy = min(5, h // 2)
+            if key == "day":    # おひさま
+                yy, xx = np.mgrid[0:h, 0:N]
+                sky[:h][(xx - 8) ** 2 + (yy - cy) ** 2 <= 5] = (255, 230, 140)
+            elif key == "night":  # おつきさま
+                for u, v in ((0, 0), (1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)):
+                    sky[max(1, cy - 1) + v, 40 + u] = (255, 240, 190)
             self._sky = sky
             r = random.Random(5)
-            n = 22 if key == "night" and self.top >= 8 else 0
+            n = (22 if self.tall else 12) if key == "night" else 0
             self._stars = (np.array([r.randrange(N) for _ in range(n)], np.int32),
-                           np.array([r.randrange(max(1, self.top - 1)) for _ in range(n)], np.int32),
+                           np.array([r.randrange(max(1, h - 2)) for _ in range(n)], np.int32),
                            np.array([r.random() * 6 for _ in range(n)], np.float32))
         sx, sy, ph = self._stars
         if sx.size == 0:
@@ -235,10 +245,20 @@ class Garden:
         return out
 
     def _ground(self, art):
-        art[self.ground] = SOIL
-        grass = (np.arange(N) * 7) % 5 < 2
-        art[self.ground - 1, grass] = np.maximum(art[self.ground - 1, grass], np.array(GRASS) * 0.8)
-
+        """地面と、風にゆれる草むら（だれの植物でもない、いつもある草）。"""
+        g = self.ground
+        art[g] = SOIL
+        if self._grass is None:
+            r = random.Random(17)
+            tufts = []
+            for x in range(N):
+                h = r.choice((0, 0, 1, 1, 2))
+                tufts += [(x, g - 1 - k, k) for k in range(h)]
+            self._grass = np.array(tufts, np.int32).reshape(-1, 3)
+        x, y, k = self._grass.T
+        sway = np.round(np.sin(self.t * 1.3 + x * 0.4) * 0.6 * (k >= 1)).astype(np.int32)
+        shade = (0.4 + 0.12 * k)[:, None] * np.array(GRASS, np.float32)
+        _put(art, x + sway, y, shade)
 
 def _put(art, x, y, colors, keep=None):
     """(x, y) のドットに色を置く（はみ出したぶんは捨てる、明るいほうを残す）。"""
@@ -267,7 +287,7 @@ def main(argv=None):
     from .screen import DotScreen
 
     ap = argparse.ArgumentParser(description="ピコの庭を PC で見る")
-    ap.add_argument("--size", default="480x800", help="画面の大きさ（例 480x800, 720x720）")
+    ap.add_argument("--size", default="720x720", help="画面の大きさ（例 480x800, 720x720）")
     ap.add_argument("--frames", type=int, default=0, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     w, h = (int(v) for v in args.size.lower().split("x"))

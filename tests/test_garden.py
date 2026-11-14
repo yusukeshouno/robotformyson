@@ -96,7 +96,9 @@ def test_sky_changes_with_time(tmp_path):
     night = gd.Garden(make_growth(tmp_path, {"p1": 0}), 80, 16, clock=lambda: NIGHT).update(0)
     assert day[:16].mean() > night[:16].mean()
     square = gd.Garden(make_growth(tmp_path, {"p1": 0}), 48, 0, clock=lambda: NOON).update(0)
-    assert square[:6].sum() == 0   # 正方形の画面では空を描かない（顔のまわりをすっきり）
+    rows = square.mean(axis=(1, 2))
+    assert rows[0] > rows[gd.SQUARE_SKY - 1] > 0   # 正方形でも上に空。下へいくほどうすい
+    assert square[gd.SQUARE_SKY:20].sum() == 0     # 目のまわりには空を描かない
 
 
 def test_face_dots_win_over_garden(tmp_path):
