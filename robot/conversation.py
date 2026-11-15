@@ -48,6 +48,7 @@ SYSTEM_PROMPT = """あなたは「{name}」という名前の、机の上にい�
 - 火・刃物・薬・高いところ・知らない人について行くなど、危ないことは「おうちの人に聞いてね」と伝えてください。こわい話や大人向けの話はしません。
 - 住所や学校の名前などの個人情報は聞かないでください。言われても、くり返したり覚えたりしないでください。
 - 音声認識の聞きまちがいで、意味が通らない文が届くことがあります。そのときは「もういっかい言って？」と聞き返してください。
+- 「はい」か「いいえ」で答えられる質問には、返事の最初に「うん」か「ううん」をはっきり言ってください。
 - わからないことは、わからないと言ってください。"""
 
 # この言葉が入っていたら、カメラの画像をいっしょに送る
@@ -123,6 +124,25 @@ def parse_reply(text):
             emotion = m.group(1).lower()
             break
     return emotion, _TAG_RE.sub("", text).strip()
+
+
+# はい・いいえ。返事の始まりだけを見る（「いいよ」は はい、「いいえ」は いいえ）
+YES_STARTS = ("はい", "うん", "そうだよ", "そうそう", "そうなの", "そう！", "そう!", "そうだね",
+              "いいよ", "いいね", "あたり", "せいかい", "正解", "もちろん", "ええ", "あってる", "できるよ")
+NO_STARTS = ("いいえ", "ううん", "うーうん", "ちがう", "違う", "いや", "だめ", "ダメ", "ざんねん",
+             "できないよ", "ないよ", "しらない", "知らない")
+
+
+def yes_no(answer):
+    """返事が「はい」か「いいえ」で始まっていれば 'yes' / 'no'。どちらでもなければ None。"""
+    t = normalize(answer).lstrip("、。,. 　")
+    for w in NO_STARTS:  # 「いいえ」を「いい」より先に見る
+        if t.startswith(normalize(w)):
+            return "no"
+    for w in YES_STARTS:
+        if t.startswith(normalize(w)):
+            return "yes"
+    return None
 
 
 def wants_look(text):
@@ -581,6 +601,7 @@ class Conversation:
             return None
         print(f"[聞こえた] {text}")
         self.events.put(("heard", 0))
+        self.events.put(("caption_heard", text))
         gesture = gesture_for(text)
         if gesture:
             self.events.put(("gesture", gesture))
@@ -601,12 +622,16 @@ class Conversation:
         if self.language:
             self.language.on_turn(text, answer)
         self.events.put((emotion, 60))
+        sign = yes_no(answer)
+        if sign:  # はい・いいえは顔でもはっきり見せる（うなずく・首をふる、〇・×）
+            self.events.put(("sign", sign))
         self._speak(answer)
         self.events.put((emotion, 1.5))
         self.last_reply = time.monotonic()
         return emotion, answer
 
     def _speak(self, text):
+        self.events.put(("caption", text))  # 字幕（スピーカーがなくても読める）
         if not self.voice:
             return
         with self._speak_lock:  # 返事と あいさつが重ならないように

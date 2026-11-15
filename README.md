@@ -366,6 +366,12 @@ python3 -m robot.memory reset         # ぜんぶ消す
 
 保存場所は `~/.local/share/robot/memory.json`（`ROBOT_MEMORY_FILE` で変更可）。
 
+## はい・いいえと字幕
+
+- 返事が「うん」「はい」で始まると、顔が2回うなずいて右下に緑の〇、「ううん」「いいえ」なら首を横にふって赤い×を出します（AI には、はい・いいえで答えられる質問には最初に「うん」か「ううん」を言うように伝えています）。
+- 画面の上に字幕を出します。聞き取った言葉はうすい色の「」で、イモの返事は白で。スピーカーがなくても何と言ったか読めます。
+- 字幕には日本語のフォントが要ります。Pi では `sudo apt install -y fonts-noto-cjk`。出したくないときは `--no-caption`。
+
 ## 手を動かす（左右の2本）
 
 箱の左右の壁に入れたサーボ2個で、手を動かします。XIAO RP2040 を USB でさせば自動でつながり、なければ手なしで動きます。部品・配線・書きこみは [firmware/arms_xiao/README.md](firmware/arms_xiao/README.md)。

@@ -158,6 +158,35 @@ SPR_DROP = _sprite(".#.", "###", "###", ".#.")
 SPR_QUESTION = _sprite(".###.", "#...#", "....#", "..##.", "..#..", ".....", "..#..")
 SPR_EXCLAIM = _sprite("##", "##", "##", "##", "..", "##")
 SPR_VEIN = _sprite(".#..#.", "##..##", "......", "##..##", ".#..#.")
+SPR_MARU = _sprite(        # 〇（はい）
+    "...#####...",
+    ".##.....##.",
+    ".#.......#.",
+    "#.........#",
+    "#.........#",
+    "#.........#",
+    "#.........#",
+    "#.........#",
+    ".#.......#.",
+    ".##.....##.",
+    "...#####...",
+)
+SPR_BATSU = _sprite(       # ×（いいえ）
+    "##.......##",
+    "###.....###",
+    ".###...###.",
+    "..###.###..",
+    "...#####...",
+    "....###....",
+    "...#####...",
+    "..###.###..",
+    ".###...###.",
+    "###.....###",
+    "##.......##",
+)
+YES_COLOR = (120, 255, 150)
+NO_COLOR = (255, 110, 110)
+SIGN_SECONDS = 2.6
 
 
 def dot_grid(w, h, nx, ny):
@@ -202,6 +231,7 @@ class Face:
         self.entered = 0.0            # 今の感情になった時刻
         self.eyes = ("normal", "normal")  # いま描いている目の形
         self.swap_start = -1.0        # 目の形を入れかえるまばたきの開始時刻
+        self.sign_kind, self.sign_start = None, -10.0  # はい・いいえ（うなずく / 首をふる、〇×）
         self.lo = pygame.Surface((N, N))
         self.grid = None
         self._ys, self._xs = np.mgrid[0:N, 0:N] + 0.5
@@ -210,6 +240,11 @@ class Face:
         if name in EMOTIONS and name != self.emotion:
             self.emotion = name
             self.entered = self.t
+
+    def sign(self, kind):
+        """kind='yes' でうなずいて〇、'no' で首をふって×を出す。"""
+        if kind in ("yes", "no"):
+            self.sign_kind, self.sign_start = kind, self.t
 
     def set_talk(self, level):
         self.talk = level
@@ -339,6 +374,13 @@ class Face:
             dy += 0.8 * abs(math.sin(t * 9)) if (t % 1.6) < 0.8 else 0
         elif m == "sway":
             dx += 1.6 * math.sin(t * 2.6)
+        ts = t - self.sign_start
+        if self.sign_kind and 0 <= ts < 1.2:  # 2回うなずく / 2回首をふる
+            env = math.sin(math.pi * ts / 1.2)
+            if self.sign_kind == "yes":
+                dy += 2.5 * abs(math.sin(ts * 2 * math.pi / 1.2)) * env
+            else:
+                dx += 2.5 * math.sin(ts * 2 * math.pi * 2 / 1.2) * env
         return round(dx), round(dy), pop
 
     # ---- 描画 ----
@@ -503,7 +545,7 @@ class Face:
         prev = None
         for x in range(round(mx - hw), round(mx + hw)):
             u = (x + 0.5 - mx) / hw
-            bend = 1 - u * u
+            bend = max(0.0, 1 - u * u)  # 誤差で少しでも負になると 0.6 乗が複素数になって落ちる
             y_up = my + curve * bend + p["wavy"] * 0.9 * math.sin(u * math.pi * 2)
             y_lo = y_up + opening * bend ** 0.6
             yu, yl = round(y_up), round(y_lo)
@@ -529,7 +571,17 @@ class Face:
                 self._put(x0 + 2 * i + 1, y0, col)
                 self._put(x0 + 2 * i, y0 + 1, col)
 
+    def _draw_sign(self):
+        ts = self.t - self.sign_start
+        if not self.sign_kind or not 0 <= ts < SIGN_SECONDS:
+            return
+        spr, col = (SPR_MARU, YES_COLOR) if self.sign_kind == "yes" else (SPR_BATSU, NO_COLOR)
+        pop = 1 + 0.35 * math.exp(-ts * 8)
+        fade = min(1.0, (SIGN_SECONDS - ts) / 0.4)
+        self._stamp(spr, 41, 40, {"#": _mix(OFF, col, fade)}, pop, pop)  # 右下（字幕・目・口にかからない）
+
     def _draw_fx(self, dx, dy):
+        self._draw_sign()
         t, te = self.t, self.t - self.entered
         fade_in = min(1.0, te / 0.3)
         for fx in self.params["fx"]:

@@ -95,6 +95,8 @@ def parse_args(argv=None):
                     help="話し方に合わせて言葉を変えない（話した長さも数えない）")
     ap.add_argument("--no-memory", action="store_true",
                     help="前に話したことをおぼえない（小さい子には無い方が楽しいこともある）")
+    ap.add_argument("--no-caption", action="store_true",
+                    help="画面の上に字幕（聞き取ったこと・返事）を出さない")
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--run-seconds", type=float, default=0, help=argparse.SUPPRESS)
     return ap.parse_args(argv)
@@ -234,6 +236,14 @@ def main(argv=None):
 
     arms, arm_link = start_arms(args)
 
+    caption = None
+    if args.talk and not args.no_caption:
+        from .caption import Caption
+        caption = Caption(cw)
+        if not caption.ok:
+            print("字幕: 日本語のフォントがないので出しません（sudo apt install fonts-noto-cjk）")
+            caption = None
+
     last_face = [0.0]
     conv = None
     if args.talk:
@@ -325,6 +335,15 @@ def main(argv=None):
                     if arms:
                         arms.do(dur)
                     continue
+                if emo == "sign":  # はい・いいえ
+                    face.sign(dur)
+                    if arms and dur == "yes":
+                        arms.perk()
+                    continue
+                if emo in ("caption", "caption_heard"):
+                    if caption:
+                        (caption.say if emo == "caption" else caption.heard)(dur, now)
+                    continue
                 if emo == "heard":
                     if engine.notice(now) and arms:
                         arms.perk()  # 眠っていたら、はっと手をあげる
@@ -335,6 +354,10 @@ def main(argv=None):
                     engine.set_mood(emo, now)
             talk += (conv.mouth_level() - talk) * 0.6
             face.set_talk(talk)
+            if caption:
+                if talk > 0.05:
+                    caption.hold(now)
+                caption.update(now)
 
         emotion = engine.update(now)
         face.set_emotion(emotion)
@@ -350,6 +373,8 @@ def main(argv=None):
         else:
             dots.draw(canvas, face)
 
+        if caption:
+            caption.draw(canvas)
         if show_cam and tracker:
             img = tracker.preview()
             if img is not None:
