@@ -12,6 +12,7 @@
 import argparse
 import os
 import socket
+import sys
 import time
 
 import pygame
@@ -180,6 +181,10 @@ def start_arms(args):
 
 
 def main(argv=None):
+    try:  # ログに1行ずつすぐ書く（ファイルに出すと、ためこまれて落ちたときに消えるため）
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     args = parse_args(argv)
     pygame.display.init()
     pygame.font.init()
