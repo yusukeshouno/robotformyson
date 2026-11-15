@@ -535,7 +535,9 @@ class Ears:
     """
 
     MAX_UTTERANCE = 15.0   # 書き起こしに送る音の長さの上限（秒）
-    PRE_ROLL = 0.6         # 話しはじめの前に残しておく音（秒）。言いはじめが切れないように
+    PRE_ROLL = 1.0         # 話しはじめの前に残しておく音（秒）。言いはじめが切れないように
+    LOUD_HOLD = 2.0        # 雑音より大きい音のあと、この秒数は音を捨てない（Vosk が気づかない小さな声のため）
+    LOUD_RATIO = 3.0       # 部屋の雑音の何倍で「声かも」とみるか
 
     def __init__(self, model_path=DEFAULT_VOSK, device=None, rate=None, gate=None,
                  recognizer=None, transcriber=None):
@@ -561,6 +563,9 @@ class Ears:
         # on_unclear(): 声はしたのに書き起こしが「声ではない」と言ったときに呼ぶ
         self.on_listen = None
         self.on_unclear = None
+        self.floor = 0.0       # 部屋の雑音の大きさ（RMS、int16）
+        self._quiet_left = 0   # あと何バイト「静か」が続けば、前の音を捨ててよいか
+        self._loud_bytes = 0   # この発話で「声かも」だった音の長さ（バイト）
 
     def mute(self, on):
         """on=True で閉じる。False で開く（実際に聞きはじめるのは余韻の時間のあと）。"""
@@ -588,8 +593,9 @@ class Ears:
             limit = int(self.rate * self.MAX_UTTERANCE) * 2
             if len(self.buf) > limit:
                 del self.buf[:len(self.buf) - limit]
+            self._watch_level(pcm_bytes)
         if not self.rec.AcceptWaveform(pcm_bytes):
-            if self.transcriber and not self._partial():
+            if self.transcriber and not self._partial() and self._quiet_left <= 0:
                 # まだだれも話していない: 雑音を送らないよう、直前の少しだけ残す
                 keep = int(self.rate * self.PRE_ROLL) * 2
                 if len(self.buf) > keep:
@@ -597,9 +603,12 @@ class Ears:
             return None
         text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
         audio, self.buf = bytes(self.buf), bytearray()
+        # Vosk が文字にできなくても、雑音よりはっきり大きい音が 0.3 秒以上あれば、小さな声かもしれない
+        maybe_voice = self._loud_bytes >= int(self.rate * 0.3) * 2
+        self._loud_bytes = 0
         if text and self.on_listen:
             self.on_listen(text)
-        if text and self.transcriber:  # Vosk が何か聞こえたときだけ送る（雑音は送らない）
+        if (text or maybe_voice) and self.transcriber:  # 声らしいときだけ送る（雑音は送らない）
             better = self.transcriber(audio, self.rate)
             if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
                 text = better
@@ -608,6 +617,24 @@ class Ears:
         if text and self.gate.is_open() and self.gate.epoch == epoch:
             return text
         return None
+
+    def _watch_level(self, pcm_bytes):
+        """音の大きさを見て、部屋の雑音の大きさを覚え、声らしい音のあとはしばらく音を捨てない。"""
+        x = np.frombuffer(pcm_bytes[:len(pcm_bytes) // 2 * 2], np.int16).astype(np.float32)
+        if not len(x):
+            return
+        rms = float(np.sqrt((x * x).mean()))
+        if self.floor <= 0:
+            self.floor = rms
+        elif rms < self.floor * 1.5:          # 静かなときだけ、ゆっくり雑音の大きさを合わせる
+            self.floor += (rms - self.floor) * 0.05
+        elif rms > self.floor * 6:            # 大きな音が続いても、少しずつ上がる
+            self.floor += (rms - self.floor) * 0.002
+        if rms > max(self.floor * self.LOUD_RATIO, 150):
+            self._loud_bytes += len(pcm_bytes)
+            self._quiet_left = int(self.rate * self.LOUD_HOLD) * 2
+        else:
+            self._quiet_left -= len(pcm_bytes)
 
     def _partial(self):
         """Vosk が今なにか聞き取りかけているか。"""

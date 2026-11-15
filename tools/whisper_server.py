@@ -30,15 +30,15 @@ HALLUCINATIONS = ("ご視聴ありがとうございました", "ご視聴あり
                   "おやすみなさい。おやすみなさい", "字幕", "ありがとうございました。ありがとうございました",
                   "次回予告", "お疲れ様でした。お疲れ様でした")
 PROMPT = "イモ"   # 名前だけ渡す（長い文を渡すと、聞こえないときにその文を写してしまう）
-MIN_VOICE = 0.25  # 声らしい音がこの秒数より短ければ、書き起こさない
-VOICE_LEVEL = 0.015  # 声とみなす音の大きさ（RMS）の上限。部屋の雑音はおよそ 0.007
+MIN_VOICE = 0.15  # 声らしい音がこの秒数より短ければ、書き起こさない
+VOICE_LEVEL = 0.012  # 声とみなす音の大きさ（RMS）の上限。部屋の雑音はおよそ 0.008
 VOICE_LEVEL_MIN = 0.004  # マイクの感度を下げたときの下限
 
 
 def voiced_seconds(audio, frame=0.03):
     """声らしい（ある大きさより大きい）音の長さ（秒）。
 
-    「声」の目安は、この音の中の静かな所（下から1割）の3倍。ただし VOICE_LEVEL より上にはしない
+    「声」の目安は、この音の中の静かな所（下から1割）の2.5倍。ただし VOICE_LEVEL より上にはしない
     （音のほとんどが声のときに本物の声まで捨てないため）。マイクの感度を下げると声も小さくなるので、
     決まった大きさだけで見ると、名前のような短い言葉を「声がない」として捨ててしまう。
     """
@@ -46,7 +46,7 @@ def voiced_seconds(audio, frame=0.03):
     if len(audio) < n:
         return 0.0
     e = np.sqrt((audio[:len(audio) // n * n].reshape(-1, n) ** 2).mean(axis=1))
-    level = min(VOICE_LEVEL, max(VOICE_LEVEL_MIN, 3 * float(np.percentile(e, 10))))
+    level = min(VOICE_LEVEL, max(VOICE_LEVEL_MIN, 2.5 * float(np.percentile(e, 10))))
     return float((e > level).sum() * frame)
 
 

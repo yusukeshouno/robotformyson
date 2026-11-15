@@ -61,8 +61,8 @@ def test_ears_sends_only_preroll_before_speech():
     chunk = b"\x01\x00" * 1600          # 0.1 秒
     for _ in range(26):
         ears.accept(chunk)
-    # 静かな 19 個ぶんは捨て、話しはじめ前の 0.6 秒 ＋ 話している 0.7 秒くらいだけ送る
-    assert got and got[0] <= len(chunk) * 14
+    # 静かな 19 個ぶんは捨て、話しはじめ前の 1.0 秒 ＋ 話している 0.7 秒くらいだけ送る
+    assert got and got[0] <= len(chunk) * 18
 
 
 def test_ears_skips_transcriber_on_silence_and_falls_back():
@@ -179,3 +179,32 @@ def test_conversation_thinks_early_and_asks_again_while_enrolling():
     ears.on_unclear()                                # 名前を待っている → 聞きなおす
     ev = conv.poll()
     assert ("caption", "ん？ きこえなかった。もういっかい いって？") in ev
+
+
+def _chunk(level, n=1600, seed=0):
+    rng = np.random.default_rng(seed)
+    return (rng.standard_normal(n) * level).astype(np.int16).tobytes()
+
+
+def test_ears_keeps_quiet_voice_that_vosk_did_not_notice():
+    """実機: 名前を小さめの声で言うと（雑音の約5倍）、Vosk は途中経過を出さず、音が捨てられていた。"""
+    class Rec(FakeRec):
+        def PartialResult(self):
+            return json.dumps({"partial": ""})   # Vosk は最後まで何も気づかない
+
+    got = []
+    noise, voice = [_chunk(180, seed=i) for i in range(30)], [_chunk(900, seed=99 + i) for i in range(8)]
+    seq = noise + voice + noise[:5]
+    ears = cv.Ears(rate=16000, gate=MicGate(tail=0), recognizer=Rec([None] * (len(seq) - 1) + [""]),
+                   transcriber=lambda pcm, rate: got.append(len(pcm)) or "ゆうすけ")
+    out = [ears.accept(c) for c in seq]
+    assert out[-1] == "ゆうすけ"                      # Vosk の文字が空でも、声らしければ Whisper に送る
+    assert got[0] >= len(voice[0]) * (8 + 5)          # 声の部分がまるごと入っている
+
+
+def test_ears_does_not_send_plain_noise_when_vosk_hears_nothing():
+    got = []
+    seq = [_chunk(180, seed=i) for i in range(30)]
+    ears = cv.Ears(rate=16000, gate=MicGate(tail=0), recognizer=FakeRec([None] * 29 + [""]),
+                   transcriber=lambda pcm, rate: got.append(1) or "x")
+    assert [ears.accept(c) for c in seq][-1] is None and got == []
