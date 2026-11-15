@@ -31,16 +31,20 @@ HALLUCINATIONS = ("ご視聴ありがとうございました", "ご視聴あり
                   "次回予告", "お疲れ様でした。お疲れ様でした")
 PROMPT = "イモ"   # 名前だけ渡す（長い文を渡すと、聞こえないときにその文を写してしまう）
 MIN_VOICE = 0.25  # 声らしい音がこの秒数より短ければ、書き起こさない
+VOICE_LEVEL = 0.015  # 声とみなす音の大きさ（RMS）。部屋の雑音はおよそ 0.007
 
 
 def voiced_seconds(audio, frame=0.03):
-    """声らしい（まわりより大きい）音の長さ（秒）。"""
+    """声らしい（ある大きさより大きい）音の長さ（秒）。
+
+    以前は「この音の中の静かな所の3倍」で決めていたが、Pi が話しはじめの直前から
+    送るようになって音のほとんどが声になり、本物の声まで捨てていた。今は決まった大きさで見る。
+    """
     n = int(RATE * frame)
     if len(audio) < n:
         return 0.0
     e = np.sqrt((audio[:len(audio) // n * n].reshape(-1, n) ** 2).mean(axis=1))
-    floor = np.percentile(e, 20)
-    return float(((e > max(0.01, floor * 3))).sum() * frame)
+    return float((e > VOICE_LEVEL).sum() * frame)
 
 
 def repetitive(text):

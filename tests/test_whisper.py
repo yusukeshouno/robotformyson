@@ -135,3 +135,7 @@ def test_server_reads_and_resamples_wav():
     tone = np.zeros(32000, np.float32)
     tone[8000:16000] = 0.3 * np.sin(np.arange(8000) / 5)
     assert 0.4 < ws.voiced_seconds(tone) < 0.6
+    talk = 0.2 * np.sin(np.arange(16000) / 4).astype(np.float32)   # ほとんど声だけの音
+    assert ws.voiced_seconds(talk) > 0.9
+    noise = (np.random.default_rng(0).standard_normal(16000) * 0.007).astype(np.float32)
+    assert ws.voiced_seconds(noise) < 0.1
