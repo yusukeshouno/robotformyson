@@ -386,6 +386,8 @@ curl http://localhost:8765/health
 python3 -m robot.main --fullscreen --talk --whisper-url http://Mac-mini.local:8765 ...
 ```
 
+「話しはじめ・話し終わり」は、Silero VAD（人の声かどうかだけを見る 2MB の小さなモデル、MIT ライセンス、`robot/data/` に同梱）で見つけます。Vosk より小さな声に強く、名前や「うん」のような短い言葉も落としにくくなります。`pip install onnxruntime` が入っていれば自動で使い、なければ Vosk で区切ります（`--no-vad` で Vosk に戻せます）。
+
 ## 手を動かす（左右の2本）
 
 箱の左右の壁に入れたサーボ2個で、手を動かします。XIAO RP2040 を USB でさせば自動でつながり、なければ手なしで動きます。部品・配線・書きこみは [firmware/arms_xiao/README.md](firmware/arms_xiao/README.md)。

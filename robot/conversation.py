@@ -541,8 +541,12 @@ class Ears:
     LOUD_RATIO = 3.0       # 部屋の雑音の何倍で「声かも」とみるか
 
     def __init__(self, model_path=DEFAULT_VOSK, device=None, rate=None, gate=None,
-                 recognizer=None, transcriber=None):
+                 recognizer=None, transcriber=None, segmenter=None):
         self.device = device
+        # segmenter: 話しはじめ・終わりを見つける係（robot.vad.Segmenter、Silero VAD）。
+        # あれば Vosk より小さな声に強い。Vosk は Whisper が使えないときの文字の係になる。
+        self.segmenter = segmenter
+        self._rough = []
         self.gate = gate or MicGate()
         # transcriber(pcm_bytes, rate) -> 文字 / ""（声ではない）/ None（使えない）。Mac の Whisper など。
         # Vosk は「話しはじめ・話し終わり」を見つける係になり、文字は transcriber のものを使う。
@@ -588,7 +592,12 @@ class Ears:
         if epoch != self._epoch:              # 話したあと最初の音: 途中経過を捨てる
             self.rec.Reset()
             self.buf.clear()
+            self._rough = []
+            if self.segmenter:
+                self.segmenter.reset()
             self._epoch = epoch
+        if self.segmenter:
+            return self._process_vad(epoch, pcm_bytes)
         if self.transcriber:
             self.buf += pcm_bytes
             limit = int(self.rate * self.MAX_UTTERANCE) * 2
@@ -611,6 +620,31 @@ class Ears:
         if text and self.on_listen:
             self.on_listen(text)
         if (text or maybe_voice) and self.transcriber:  # 声らしいときだけ送る（雑音は送らない）
+            better = self.transcriber(audio, self.rate)
+            if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
+                text = better
+                if not text and self.on_unclear:
+                    self.on_unclear(rough)
+        if text and self.gate.is_open() and self.gate.epoch == epoch:
+            return text
+        return None
+
+    def _process_vad(self, epoch, pcm_bytes):
+        """Silero VAD で区切る。Vosk は横で聞いて、当て推量の文字（rough）を作るだけ。"""
+        was_speaking = self.segmenter.speaking
+        audio = self.segmenter.feed(pcm_bytes)
+        if self.rec.AcceptWaveform(pcm_bytes):
+            self._rough.append(json.loads(self.rec.Result()).get("text", ""))
+        if audio is None:
+            if not was_speaking and not self.segmenter.speaking:
+                self._rough = []              # だれも話していない間の Vosk の聞きまちがいは捨てる
+            return None
+        self._rough.append(json.loads(self.rec.FinalResult()).get("text", ""))
+        rough, self._rough = "".join(self._rough).replace(" ", ""), []
+        if self.on_listen:
+            self.on_listen(rough)
+        text = rough
+        if self.transcriber:
             better = self.transcriber(audio, self.rate)
             if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
                 text = better
@@ -694,7 +728,13 @@ class Conversation:
 
     def _on_listen(self, rough_text):
         """話し終わった直後（文字になる前）。返事をしそうなら、すぐ考える顔にする。"""
-        self._thinking = self.should_reply(rough_text)
+        if rough_text:
+            self._thinking = self.should_reply(rough_text)
+        else:  # Vosk は文字にできなかったが、声はした（Silero VAD）。待っている相手なら考える顔に
+            self._thinking = bool(
+                (self.enroll and self.enroll.active)
+                or time.monotonic() - self.last_reply < self.FOLLOW_UP
+                or (self.is_attended and self.is_attended()))
         if self._thinking:
             self.events.put(("think", 4))
 

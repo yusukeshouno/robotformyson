@@ -84,6 +84,8 @@ def parse_args(argv=None):
                     help="Ollama の場所（Mac で動かすなら http://<Macの名前>.local:11434）")
     ap.add_argument("--model", default=None, help="使うモデル名")
     ap.add_argument("--vosk-model", default=None, help="音声認識モデルのフォルダ")
+    ap.add_argument("--no-vad", action="store_true",
+                    help="話の区切りを Silero VAD ではなく Vosk で見つける")
     ap.add_argument("--whisper-url", default=None,
                     help="Whisper の書き起こしサーバー（例 http://Mac-mini.local:8765）。"
                          "指定すると聞き取りが正確になる。ROBOT_WHISPER_URL でも可")
@@ -154,7 +156,11 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
         ears = cv.Ears(args.vosk_model or cv.DEFAULT_VOSK, device=mic,
                        gate=cv.MicGate(audio.echo_tail),
                        transcriber=cv.WhisperClient(whisper) if whisper else None)
-        print(f"聞き取り: {'Whisper（' + whisper + '）、つながらないときは Vosk' if whisper else 'Vosk'}")
+        if not args.no_vad:  # 話しはじめ・終わりは Silero VAD で（小さな声に強い）
+            from .vad import Segmenter
+            ears.segmenter = Segmenter.create(ears.rate)
+        print(f"聞き取り: {'Whisper（' + whisper + '）、つながらないときは Vosk' if whisper else 'Vosk'}"
+              f"、区切り: {'Silero VAD' if ears.segmenter else 'Vosk'}")
     except Exception as e:
         print(f"会話機能を使わずに起動します（{e}）")
         return None
