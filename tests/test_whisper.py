@@ -45,6 +45,26 @@ def test_ears_uses_transcriber_text_and_whole_utterance():
     assert len(ears.buf) == 0
 
 
+def test_ears_sends_only_preroll_before_speech():
+    class PartialRec(FakeRec):
+        def PartialResult(self):
+            return json.dumps({"partial": "" if self.cur is None and self.n < 20 else "あ"})
+
+        def AcceptWaveform(self, data):
+            self.n = getattr(self, "n", 0) + 1
+            return super().AcceptWaveform(data)
+
+    got = []
+    ears = cv.Ears(rate=16000, gate=MicGate(tail=0),
+                   recognizer=PartialRec([None] * 25 + ["あいう"]),
+                   transcriber=lambda pcm, rate: got.append(len(pcm)) or "あいう")
+    chunk = b"\x01\x00" * 1600          # 0.1 秒
+    for _ in range(26):
+        ears.accept(chunk)
+    # 静かな 19 個ぶんは捨て、話しはじめ前の 0.6 秒 ＋ 話している 0.7 秒くらいだけ送る
+    assert got and got[0] <= len(chunk) * 14
+
+
 def test_ears_skips_transcriber_on_silence_and_falls_back():
     calls = []
     ears = cv.Ears(rate=16000, gate=MicGate(tail=0), recognizer=FakeRec(["", "こんにちは"]),
@@ -107,3 +127,11 @@ def test_server_reads_and_resamples_wav():
     assert audio.dtype == np.float32 and abs(len(audio) - 16000) <= 1
     assert ws.clean("ご視聴ありがとうございました") == ""
     assert ws.clean(" うん ") == "うん"
+    assert ws.clean("おいしいよ。おいしいよ。おいしいよ。おいしいよ。") == ""
+    assert ws.clean("うれば、うれば、うれば、うれば、うれば") == ""
+    assert ws.clean("イモ。") == ""
+    assert ws.clean("イモ、りんごはすき？") == "イモ、りんごはすき？"
+    assert ws.voiced_seconds(np.zeros(16000, np.float32)) == 0.0
+    tone = np.zeros(32000, np.float32)
+    tone[8000:16000] = 0.3 * np.sin(np.arange(8000) / 5)
+    assert 0.4 < ws.voiced_seconds(tone) < 0.6

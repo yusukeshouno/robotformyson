@@ -29,7 +29,30 @@ RATE = 16000
 HALLUCINATIONS = ("ご視聴ありがとうございました", "ご視聴ありがとうございます", "チャンネル登録",
                   "おやすみなさい。おやすみなさい", "字幕", "ありがとうございました。ありがとうございました",
                   "次回予告", "お疲れ様でした。お疲れ様でした")
-PROMPT = "イモ、こんにちは。うん、いいよ。ねえねえ、きいて。"  # 名前と、子どもの話し言葉に寄せる
+PROMPT = "イモ"   # 名前だけ渡す（長い文を渡すと、聞こえないときにその文を写してしまう）
+MIN_VOICE = 0.25  # 声らしい音がこの秒数より短ければ、書き起こさない
+
+
+def voiced_seconds(audio, frame=0.03):
+    """声らしい（まわりより大きい）音の長さ（秒）。"""
+    n = int(RATE * frame)
+    if len(audio) < n:
+        return 0.0
+    e = np.sqrt((audio[:len(audio) // n * n].reshape(-1, n) ** 2).mean(axis=1))
+    floor = np.percentile(e, 20)
+    return float(((e > max(0.01, floor * 3))).sum() * frame)
+
+
+def repetitive(text):
+    """同じ言葉を何度もくり返す（Whisper のくせ）なら True。"""
+    t = text.replace("、", "").replace("。", "").replace(" ", "")
+    if len(t) < 8:
+        return False
+    for size in range(1, len(t) // 3 + 1):
+        unit = t[:size]
+        if t.count(unit) * size >= len(t) * 0.8 and t.count(unit) >= 3:
+            return True
+    return False
 
 
 def read_wav(data):
@@ -50,10 +73,18 @@ def read_wav(data):
 
 def clean(text):
     t = text.strip()
+    if t.strip("。、!?！？ ") == PROMPT or repetitive(t):
+        return ""
     for h in HALLUCINATIONS:
         if h in t:
             return ""
     return t
+
+
+def keep_segment(s):
+    """自信のない区切り（音がない・同じことのくり返し）を捨てる。"""
+    return (s.get("no_speech_prob", 0) < 0.5 and s.get("avg_logprob", 0) > -1.0
+            and s.get("compression_ratio", 0) < 2.4)
 
 
 class Engine:
@@ -77,11 +108,13 @@ class Engine:
                                         temperature=0.0, condition_on_previous_text=False,
                                         initial_prompt=PROMPT, verbose=None)
                 segs = r.get("segments", [])
-                return "".join(s["text"] for s in segs if s.get("no_speech_prob", 0) < 0.6)
+                return "".join(s["text"] for s in segs if keep_segment(s))
             segs, _ = self.fw.transcribe(audio, language="ja", beam_size=1, temperature=0.0,
                                          condition_on_previous_text=False, initial_prompt=PROMPT,
                                          vad_filter=False)
-            return "".join(s.text for s in segs if s.no_speech_prob < 0.6)
+            return "".join(s.text for s in segs if keep_segment(
+                {"no_speech_prob": s.no_speech_prob, "avg_logprob": s.avg_logprob,
+                 "compression_ratio": s.compression_ratio}))
 
 
 def make_handler(engine):
@@ -111,6 +144,9 @@ def make_handler(engine):
             except (ValueError, wave.Error, EOFError) as e:
                 return self._send(400, {"error": str(e)})
             t0 = time.monotonic()
+            if voiced_seconds(audio) < MIN_VOICE:
+                print(f"[{len(audio) / RATE:4.1f}秒] 声がないので書き起こさない", flush=True)
+                return self._send(200, {"text": ""})
             text = clean(engine.transcribe(audio))
             print(f"[{len(audio) / RATE:4.1f}秒 → {time.monotonic() - t0:4.2f}秒] {text}", flush=True)
             self._send(200, {"text": text})

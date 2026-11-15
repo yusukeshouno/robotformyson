@@ -534,6 +534,7 @@ class Ears:
     """
 
     MAX_UTTERANCE = 15.0   # 書き起こしに送る音の長さの上限（秒）
+    PRE_ROLL = 0.6         # 話しはじめの前に残しておく音（秒）。言いはじめが切れないように
 
     def __init__(self, model_path=DEFAULT_VOSK, device=None, rate=None, gate=None,
                  recognizer=None, transcriber=None):
@@ -582,16 +583,29 @@ class Ears:
             limit = int(self.rate * self.MAX_UTTERANCE) * 2
             if len(self.buf) > limit:
                 del self.buf[:len(self.buf) - limit]
-        if self.rec.AcceptWaveform(pcm_bytes):
-            text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
-            audio, self.buf = bytes(self.buf), bytearray()
-            if text and self.transcriber:  # Vosk が何か聞こえたときだけ送る（雑音は送らない）
-                better = self.transcriber(audio, self.rate)
-                if better:
-                    text = better
-            if text and self.gate.is_open() and self.gate.epoch == epoch:
-                return text
+        if not self.rec.AcceptWaveform(pcm_bytes):
+            if self.transcriber and not self._partial():
+                # まだだれも話していない: 雑音を送らないよう、直前の少しだけ残す
+                keep = int(self.rate * self.PRE_ROLL) * 2
+                if len(self.buf) > keep:
+                    del self.buf[:len(self.buf) - keep]
+            return None
+        text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
+        audio, self.buf = bytes(self.buf), bytearray()
+        if text and self.transcriber:  # Vosk が何か聞こえたときだけ送る（雑音は送らない）
+            better = self.transcriber(audio, self.rate)
+            if better:
+                text = better
+        if text and self.gate.is_open() and self.gate.epoch == epoch:
+            return text
         return None
+
+    def _partial(self):
+        """Vosk が今なにか聞き取りかけているか。"""
+        try:
+            return bool(json.loads(self.rec.PartialResult()).get("partial", "").strip())
+        except (AttributeError, ValueError):
+            return True
 
     def accept(self, pcm_bytes):
         """（互換用）今の状態で音を1つ渡す。"""
