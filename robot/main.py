@@ -96,7 +96,7 @@ def parse_args(argv=None):
     ap.add_argument("--no-memory", action="store_true",
                     help="前に話したことをおぼえない（小さい子には無い方が楽しいこともある）")
     ap.add_argument("--no-caption", action="store_true",
-                    help="画面の上に字幕（聞き取ったこと・返事）を出さない")
+                    help="画面の上に字幕（イモの返事）を出さない")
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--run-seconds", type=float, default=0, help=argparse.SUPPRESS)
     return ap.parse_args(argv)
@@ -340,9 +340,9 @@ def main(argv=None):
                     if arms and dur == "yes":
                         arms.perk()
                     continue
-                if emo in ("caption", "caption_heard"):
+                if emo == "caption":  # 字幕はイモの返事だけ
                     if caption:
-                        (caption.say if emo == "caption" else caption.heard)(dur, now)
+                        caption.say(dur, now)
                     continue
                 if emo == "heard":
                     if engine.notice(now) and arms:

@@ -601,7 +601,6 @@ class Conversation:
             return None
         print(f"[聞こえた] {text}")
         self.events.put(("heard", 0))
-        self.events.put(("caption_heard", text))
         gesture = gesture_for(text)
         if gesture:
             self.events.put(("gesture", gesture))

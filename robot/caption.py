@@ -1,4 +1,4 @@
-"""画面の上に字幕を出す（イモが聞き取ったこと・イモの返事）。
+"""画面の上に字幕を出す（イモの返事）。
 
 スピーカーがなくても、何と言ったかが読める。耳の聞こえにくい人や、まだ字を練習中の子にも。
 日本語のフォントが見つからないときは字幕を出さない（Pi では `sudo apt install fonts-noto-cjk`）。
@@ -21,7 +21,6 @@ FONT_CANDIDATES = (
 MATCH_NAMES = "notosanscjkjp,notosanscjk,ipagothic,takaogothic,droidsansfallback,hiraginosans,meiryo"
 
 WHITE = (240, 245, 255)
-GRAY = (150, 165, 190)
 BAND = (8, 10, 20, 200)
 
 
@@ -62,7 +61,7 @@ def wrap(text, width_of, max_width, max_lines=3):
 
 
 class Caption:
-    """字幕。heard() で聞き取った言葉、say() で返事を出す。update() で時間がたつと消える。"""
+    """字幕。say() で返事を出す。update() で時間がたつと消える。"""
 
     def __init__(self, width, font_path=None, size=None):
         pygame.font.init()
@@ -76,10 +75,6 @@ class Caption:
     @property
     def ok(self):
         return self.font is not None
-
-    def heard(self, text, now):
-        """聞き取った言葉（考えているあいだ、うすい色で）。"""
-        self._set(f"「{text}」", GRAY, now + 30.0)
 
     def say(self, text, now):
         """イモの返事。読む時間を見て、しばらく出しておく。"""

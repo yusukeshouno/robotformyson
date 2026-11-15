@@ -257,8 +257,7 @@ def test_conversation_flow(monkeypatch):
     assert conv.handle("これ みて") == ("joy", "やあ！")
     assert brain.calls == [("これ みて", b"jpeg")]
     assert voice.said == ["やあ！"] and ears.mutes == [True, False]
-    assert [e for e, _ in conv.poll()] == ["heard", "caption_heard", "think", "joy", "caption",
-                                           "joy"]
+    assert [e for e, _ in conv.poll()] == ["heard", "think", "joy", "caption", "joy"]
 
 
 def test_conversation_only_replies_when_attended_or_called():

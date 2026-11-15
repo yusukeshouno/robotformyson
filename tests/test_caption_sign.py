@@ -30,7 +30,7 @@ def test_reply_events_include_sign_and_caption(monkeypatch):
     conv.handle("イモ、りんご すき？")
     events = conv.poll()
     assert ("sign", "yes") in events
-    assert ("caption_heard", "イモ、りんご すき？") in events
+    assert not any(e == "caption_heard" for e, _ in events)  # 字幕は返事だけ
     assert ("caption", "うん、すきだよ！") in events
 
 
