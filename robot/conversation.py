@@ -479,6 +479,42 @@ class Voice:
 
 
 # ---------------------------------------------------------------- 聞く
+class WhisperClient:
+    """Mac などで動かす Whisper の書き起こしサーバー（tools/whisper_server.py）に音を送る。
+
+    つながらないときは None を返し、30秒は送らない（そのあいだは Vosk の文字を使う）。
+    """
+
+    RETRY = 30.0
+
+    def __init__(self, url, timeout=10.0, clock=time.monotonic):
+        self.url = url.rstrip("/")
+        self.timeout = timeout
+        self.clock = clock
+        self.down_until = 0.0
+
+    def __call__(self, pcm_bytes, rate):
+        if not pcm_bytes or self.clock() < self.down_until:
+            return None
+        import io
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(pcm_bytes)
+        req = urllib.request.Request(self.url + "/transcribe", data=out.getvalue(),
+                                     headers={"Content-Type": "audio/wav"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                text = json.loads(r.read().decode("utf-8")).get("text", "")
+        except (OSError, ValueError) as e:
+            print(f"[書き起こし] つながらないので Vosk を使います（{e}）")
+            self.down_until = self.clock() + self.RETRY
+            return None
+        return text.replace(" ", "").replace("　", "").strip() or None
+
+
 def pick_rate(device=None, want=16000):
     """録音のサンプリングレート。音声認識モデルは 16kHz 用なので、録れるなら 16kHz で録る
     （44.1kHz を渡すと Vosk の中で変換が1回ふえ、聞き取りが少し悪くなる）。"""
@@ -497,10 +533,16 @@ class Ears:
     閉じる前に録りかけていた言葉の切れ端は捨てる（自分の声を拾わないため）。
     """
 
+    MAX_UTTERANCE = 15.0   # 書き起こしに送る音の長さの上限（秒）
+
     def __init__(self, model_path=DEFAULT_VOSK, device=None, rate=None, gate=None,
-                 recognizer=None):
+                 recognizer=None, transcriber=None):
         self.device = device
         self.gate = gate or MicGate()
+        # transcriber(pcm_bytes, rate) -> 文字 / None。Mac の Whisper など、より正確な書き起こし。
+        # Vosk は「話しはじめ・話し終わり」を見つける係になり、文字は transcriber のものを使う。
+        self.transcriber = transcriber
+        self.buf = bytearray()
         if recognizer is None:
             from vosk import KaldiRecognizer, Model, SetLogLevel
             SetLogLevel(-1)
@@ -533,9 +575,20 @@ class Ears:
             return None                       # 話す前に録った音・話している間の音
         if epoch != self._epoch:              # 話したあと最初の音: 途中経過を捨てる
             self.rec.Reset()
+            self.buf.clear()
             self._epoch = epoch
+        if self.transcriber:
+            self.buf += pcm_bytes
+            limit = int(self.rate * self.MAX_UTTERANCE) * 2
+            if len(self.buf) > limit:
+                del self.buf[:len(self.buf) - limit]
         if self.rec.AcceptWaveform(pcm_bytes):
             text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
+            audio, self.buf = bytes(self.buf), bytearray()
+            if text and self.transcriber:  # Vosk が何か聞こえたときだけ送る（雑音は送らない）
+                better = self.transcriber(audio, self.rate)
+                if better:
+                    text = better
             if text and self.gate.is_open() and self.gate.epoch == epoch:
                 return text
         return None

@@ -57,7 +57,7 @@ def test_wrap_japanese():
 
 
 def test_caption_timing():
-    c = Caption(480, font_path=None)
+    c = Caption(480)
     c.say("うん！", now=0.0)
     c.update(1.0)
     assert c.text == "うん！"

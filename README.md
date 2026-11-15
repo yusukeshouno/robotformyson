@@ -370,7 +370,21 @@ python3 -m robot.memory reset         # ぜんぶ消す
 
 - 返事が「うん」「はい」で始まると、顔が2回うなずいて右下に緑の〇、「ううん」「いいえ」なら首を横にふって赤い×を出します（AI には、はい・いいえで答えられる質問には最初に「うん」か「ううん」を言うように伝えています）。
 - 画面の上に、イモの返事を字幕で出します。スピーカーがなくても何と言ったか読めます。
-- 字幕には日本語のフォントが要ります。Pi では `sudo apt install -y fonts-noto-cjk`。出したくないときは `--no-caption`。
+- 字幕の文字は顔と同じドット絵の雰囲気のピクセルフォント（PixelMplus12、M+ FONT LICENSE、`robot/fonts/` に同梱）。出したくないときは `--no-caption`。
+
+## 聞き取りを正確にする（Mac mini の Whisper）
+
+Pi の Vosk（小さいモデル）は、子どもの声やくだけた話し方の聞き取りが苦手です。Mac mini で Whisper を動かすと、Pi は「話しはじめ・話し終わり」だけを見つけて、その間の音を Mac に送り、Mac が文字にします。音は家の中だけで、外には出ません。Mac につながらないときは、自動で Vosk に戻ります。
+
+```bash
+# Mac で（最初の1回）
+python3 -m venv ~/whisper-venv && ~/whisper-venv/bin/pip install mlx-whisper numpy
+~/whisper-venv/bin/python tools/whisper_server.py      # 初回はモデルのダウンロードで数分
+curl http://localhost:8765/health
+
+# Pi で: イモの起動に付ける
+python3 -m robot.main --fullscreen --talk --whisper-url http://Mac-mini.local:8765 ...
+```
 
 ## 手を動かす（左右の2本）
 

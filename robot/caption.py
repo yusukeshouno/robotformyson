@@ -1,41 +1,27 @@
 """画面の上に字幕を出す（イモの返事）。
 
 スピーカーがなくても、何と言ったかが読める。耳の聞こえにくい人や、まだ字を練習中の子にも。
-日本語のフォントが見つからないときは字幕を出さない（Pi では `sudo apt install fonts-noto-cjk`）。
+文字は顔と同じドット絵の雰囲気にするため、12ドットのピクセルフォント（PixelMplus12、
+M+ FONT LICENSE、robot/fonts/ に同梱）を小さく描いてから、ぼかさずに大きくする。
 """
 import os
 
 import pygame
 
-FONT_CANDIDATES = (
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
-    "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
-    "/usr/share/fonts/truetype/takao-gothic/TakaoGothic.ttf",
-    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-    "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "C:/Windows/Fonts/meiryo.ttc",
-)
-MATCH_NAMES = "notosanscjkjp,notosanscjk,ipagothic,takaogothic,droidsansfallback,hiraginosans,meiryo"
+HERE = os.path.dirname(os.path.abspath(__file__))
+PIXEL_FONT = os.path.join(HERE, "fonts", "PixelMplus12-Bold.ttf")
+PIXEL_SIZE = 12          # このフォントのドットの格子（12ドット）
 
 WHITE = (240, 245, 255)
-BAND = (8, 10, 20, 200)
+BAND = (8, 10, 20, 210)
 
 
 def find_font():
-    """日本語が書けるフォントのファイルを探す。なければ None。"""
+    """字幕のフォント。ROBOT_FONT で変えられる。なければ None。"""
     env = os.environ.get("ROBOT_FONT")
     if env and os.path.exists(env):
         return env
-    for p in FONT_CANDIDATES:
-        if os.path.exists(p):
-            return p
-    try:
-        return pygame.font.match_font(MATCH_NAMES)
-    except Exception:
-        return None
+    return PIXEL_FONT if os.path.exists(PIXEL_FONT) else None
 
 
 def wrap(text, width_of, max_width, max_lines=3):
@@ -61,15 +47,18 @@ def wrap(text, width_of, max_width, max_lines=3):
 
 
 class Caption:
-    """字幕。say() で返事を出す。update() で時間がたつと消える。"""
+    """字幕。say() で返事を出す。update() で時間がたつと消える。
 
-    def __init__(self, width, font_path=None, size=None):
+    scale: 1ドットを何ピクセルにするか。720 の画面なら 4（1文字 48 ピクセル、1行 14 文字くらい）。
+    """
+
+    def __init__(self, width, font_path=None, scale=None):
         pygame.font.init()
         self.width = width
-        self.size = size or max(18, width // 22)
+        self.scale = scale or max(2, width // 180)
         self.path = font_path if font_path is not None else find_font()
-        self.font = pygame.font.Font(self.path, self.size) if self.path else None
-        self.text, self.color, self.until = "", WHITE, 0.0
+        self.font = pygame.font.Font(self.path, PIXEL_SIZE) if self.path else None
+        self.text, self.until = "", 0.0
         self._cache = None
 
     @property
@@ -78,19 +67,16 @@ class Caption:
 
     def say(self, text, now):
         """イモの返事。読む時間を見て、しばらく出しておく。"""
-        self._set(text, WHITE, now + 4.0 + 0.18 * len(text))
+        self.text, self.until = text.strip(), now + 4.0 + 0.18 * len(text)
+        self._cache = None
 
     def hold(self, now, seconds=2.0):
         """話しているあいだは消さない。"""
-        if self.text and self.color == WHITE:
+        if self.text:
             self.until = max(self.until, now + seconds)
 
     def clear(self):
         self.text = ""
-        self._cache = None
-
-    def _set(self, text, color, until):
-        self.text, self.color, self.until = text.strip(), color, until
         self._cache = None
 
     def update(self, now):
@@ -102,22 +88,24 @@ class Caption:
         if not (self.ok and self.text):
             return None
         if self._cache is None:
-            pad = self.size // 2
-            lines = wrap(self.text, lambda s: self.font.size(s)[0], self.width - pad * 4)
-            lh = self.font.get_linesize()
-            h = lh * len(lines) + pad * 2
+            k = self.scale
+            pad = k * 3
+            inner = (self.width - pad * 4) // k                       # ドット単位の幅
+            lines = wrap(self.text, lambda s: self.font.size(s)[0], inner)
+            lh = PIXEL_SIZE + 2                                        # 行の高さ（ドット）
+            h = lh * len(lines) * k + pad * 2
             surf = pygame.Surface((self.width, h), pygame.SRCALPHA)
             pygame.draw.rect(surf, BAND, (pad, 0, self.width - pad * 2, h), border_radius=pad)
             for i, line in enumerate(lines):
-                img = self.font.render(line, True, self.color)
-                surf.blit(img, ((self.width - img.get_width()) // 2, pad + i * lh))
+                img = self.font.render(line, False, WHITE)            # ぼかさない
+                img = pygame.transform.scale(img, (img.get_width() * k, img.get_height() * k))
+                surf.blit(img, ((self.width - img.get_width()) // 2, pad + i * lh * k))
             self._cache = surf
         return self._cache
 
     def draw(self, canvas, top_margin=None):
-        """顔の上のあいている所（おでこ）に出す。口や目にかからない。"""
+        """顔の上のあいている所（おでこ）に出す。"""
         img = self.render()
         if img is None:
             return
-        m = self.size // 3 if top_margin is None else top_margin
-        canvas.blit(img, (0, m))
+        canvas.blit(img, (0, self.scale * 2 if top_margin is None else top_margin))
