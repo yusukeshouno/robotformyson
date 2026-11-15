@@ -27,6 +27,7 @@ import wave
 
 import numpy as np
 
+from .arms import gesture_for
 from .audio import (AudioSettings, MicGate, add_audio_args, output_channels, resolve_device,
                     to_channels)
 from .memory import wants_forget
@@ -580,6 +581,9 @@ class Conversation:
             return None
         print(f"[聞こえた] {text}")
         self.events.put(("heard", 0))
+        gesture = gesture_for(text)
+        if gesture:
+            self.events.put(("gesture", gesture))
         if self.enroll and self.enroll.handle(text, self._answer):
             return None
         if self.memory and wants_forget(text):  # 「いまの わすれて」：この会話はおぼえない

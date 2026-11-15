@@ -15,6 +15,7 @@ import time
 
 import pygame
 
+from .arms import ArmLink, ArmMotion, add_arm_args
 from .audio import add_audio_args
 from .camera import add_camera_args, settings_from_args
 from .emotion import EmotionEngine
@@ -84,6 +85,7 @@ def parse_args(argv=None):
     ap.add_argument("--voice", default=None, help="Open JTalk の声ファイル (.htsvoice)")
     ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
     add_audio_args(ap)
+    add_arm_args(ap)
     ap.add_argument("--no-growth", action="store_true", help="成長の記録をしない")
     ap.add_argument("--no-garden", action="store_true",
                     help="背景の「ピコの庭」を出さない（なかよし度で育つ植物）")
@@ -156,6 +158,18 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
     return conv
 
 
+def start_arms(args):
+    """手の動き。基板がなくても動きの計算はする（させば自動でつながる）。"""
+    if args.no_arms:
+        return None, None
+    link = ArmLink(args.arms_device, args.arms_swap)
+    if link.connect():
+        print(f"手: {link.label}")
+    else:
+        print("手: 基板が見つからないので動かしません（させば自動でつながります）")
+    return ArmMotion(), link
+
+
 def main(argv=None):
     args = parse_args(argv)
     pygame.display.init()
@@ -218,6 +232,8 @@ def main(argv=None):
             memory.set_person(*faces.current())
             memory.start()
 
+    arms, arm_link = start_arms(args)
+
     last_face = [0.0]
     conv = None
     if args.talk:
@@ -265,6 +281,8 @@ def main(argv=None):
                 drag += abs(ev.rel[0]) + abs(ev.rel[1])
                 if drag > S * 0.6:
                     engine.on_stroke(now)
+                    if arms:
+                        arms.nuzzle()
                     if growth:
                         react(growth.on_stroke())
                     drag = -1e9  # 1回のなでで1度だけ
@@ -295,14 +313,21 @@ def main(argv=None):
         if greeter:  # 家族が来たら、名前を呼んであいさつ
             for emo, text in greeter.poll():
                 engine.express(emo if emo in EMOTION_NAMES else "joy", 3.0, now)
+                if arms:
+                    arms.wave()
                 if conv:
                     conv.say(text)
                 else:
                     print(f"[あいさつ] {text}")
         if conv:
             for emo, dur in conv.poll():
+                if emo == "gesture":  # 「バイバイ」「バンザイ」など
+                    if arms:
+                        arms.do(dur)
+                    continue
                 if emo == "heard":
-                    engine.notice(now)
+                    if engine.notice(now) and arms:
+                        arms.perk()  # 眠っていたら、はっと手をあげる
                     if growth:
                         react(growth.on_talk())
                 else:
@@ -316,6 +341,10 @@ def main(argv=None):
         face.set_mood(*engine.mood(now))
         face.look_at((max(-1, min(1, fx)), max(-1, min(1, fy))) if present else None)
         face.update(dt)
+        hands = (0.0, 0.0)
+        if arms:
+            hands = arms.update(dt, emotion, talk, engine.sleeping, present)
+            arm_link.send(*hands)
         if garden:
             dots.draw(canvas, face, garden.update(dt), garden.keep)
         else:
@@ -330,6 +359,8 @@ def main(argv=None):
                     surf, (w, w * img.shape[0] // img.shape[1])), (8, 8))
         if debug:
             label = f"{emotion}  face={'yes' if present else 'no'}  {clock.get_fps():.0f}fps"
+            if arms:
+                label += f"  arms={hands[0]:.0f},{hands[1]:.0f}{'' if arm_link.fd is not None else ' (off)'}"
             if growth:
                 label += f"  Lv{growth.level} {growth.current['points']}pt"
             if faces:
@@ -341,6 +372,9 @@ def main(argv=None):
         screen.blit(out, ((sw - out.get_width()) // 2, (sh - out.get_height()) // 2))
         pygame.display.flip()
 
+    if arm_link:
+        arm_link.relax()
+        arm_link.close()
     if memory:
         try:
             memory.stop()
