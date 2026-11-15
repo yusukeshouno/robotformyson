@@ -356,6 +356,8 @@ def main(argv=None):
                     if caption:
                         caption.say(dur, now)
                     continue
+                if emo == "think" and caption:
+                    caption.clear()  # 前の返事の字幕で、考えている顔（上の …）が隠れないように
                 if emo == "heard":
                     if engine.notice(now) and arms:
                         arms.perk()  # 眠っていたら、はっと手をあげる

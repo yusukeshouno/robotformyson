@@ -501,3 +501,17 @@ def test_enroll_dialog_shows_progress_while_capturing():
     assert shown[0] == "ゆうと、カメラを みてね ○○○"
     assert any("●○○" in s for s in shown)
     assert said[-1] == "おぼえたよ！ よろしくね、ゆうと！"
+
+
+def test_enroll_dialog_restarts_and_gives_up_when_unclear():
+    said = []
+    speak = lambda emo, text: said.append(text)  # noqa: E731
+    d = fc.EnrollDialog(object())
+    assert d.handle("イモ、かおを おぼえて", speak)
+    assert d.handle("顔を覚えて", speak)          # 名前とまちがえない
+    assert d.state == "name" and said[-1] == "いいよ！ おなまえ おしえて？"
+    d.on_unclear(speak)
+    d.on_unclear(speak)
+    assert d.active and said[-1].startswith("ん？")
+    d.on_unclear(speak)                            # 3回聞き取れなければ、やめる
+    assert not d.active and "また あとで" in said[-1]

@@ -475,11 +475,13 @@ class EnrollDialog:
     """
 
     TIMEOUT = 40.0   # この秒数だまっていたら、やりとりをやめる
+    MAX_UNCLEAR = 3  # 聞き取れないのがこの回数つづいたら、やめる
 
     def __init__(self, recognizer, clock=time.monotonic, show=None):
         self.rec, self.clock = recognizer, clock
         self.show = show   # show(字幕)。撮っている途中の進み具合を画面に出す（スピーカーがなくても分かる）
         self.state, self.name, self.tries, self.last = None, None, 0, 0.0
+        self.unclear = 0
 
     @property
     def active(self):
@@ -488,6 +490,7 @@ class EnrollDialog:
         return self.state is not None
 
     def handle(self, text, speak):
+        self.unclear = 0
         if not self.active:
             if not wants_enroll(text):
                 return False
@@ -495,6 +498,11 @@ class EnrollDialog:
             speak("excited", "いいよ！ おなまえ おしえて？")
             return True
         self.last = self.clock()
+        if wants_enroll(text):  # もう一度「かおを おぼえて」: 名前とまちがえず、はじめから
+            self._go("name")
+            self.tries = 0
+            speak("excited", "いいよ！ おなまえ おしえて？")
+            return True
         if any(_key(w) in _key(text) for w in _CANCEL):
             self.state = None
             speak("neutral", "わかった、また こんどね。")
@@ -509,6 +517,16 @@ class EnrollDialog:
             else:
                 speak("neutral", f"{self.name}、で あってたら「うん」って いってね。")
         return True
+
+    def on_unclear(self, speak):
+        """声はしたが聞き取れなかった。何回か聞きなおし、だめならやめる。"""
+        self.unclear += 1
+        if self.unclear >= self.MAX_UNCLEAR:
+            self.state, self.unclear = None, 0
+            speak("sad", "ごめんね、うまく きこえなかった。また あとで やろうね。")
+        else:
+            self.last = self.clock()
+            speak("confused", "ん？ きこえなかった。もういっかい いって？")
 
     def _go(self, state):
         if state == "name" and self.state != "name":

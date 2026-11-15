@@ -60,9 +60,10 @@ EMOTIONS = {
                "motion": "breathe", "fx": ("zzz",)},
     "love": {"scale": 1.1, "mouth": 0.8, "mouth_open": 0.25, "blush": 1.0,
              "color": (255, 120, 190), "eyes": ("heart", "heart"), "fx": ("hearts",)},
-    # 返事を考えているあいだ：目を細めて上を見る
+    # 返事を考えているあいだ：目を細めて、上の右・左をきょろきょろ見ながら、首をかしげてゆれる
     "think": {"open": 0.85, "scale": 0.95, "lid_bot": 0.2, "mouth": -0.1, "mouth_w": 0.6,
-              "brow": 0.7, "brow_skew": 0.6, "color": (110, 200, 255), "fx": ("dots",)},
+              "brow": 0.7, "brow_skew": 0.6, "color": (110, 200, 255), "motion": "ponder",
+              "fx": ("dots",)},
     # ここから下はピクセルアート化で増やした表情
     "shy": {"open": 0.8, "scale": 0.92, "lid_bot": 0.35, "mouth": 0.2, "wavy": 1.0,
             "mouth_w": 0.6, "blush": 1.0, "color": (150, 210, 255), "motion": "fidget"},
@@ -309,8 +310,9 @@ class Face:
         e = self.emotion
         if e == "sleepy":
             goal = (0.0, 0.3)
-        elif e == "think":
-            goal = (0.45 + 0.1 * math.sin(self.t * 0.8), -0.6)
+        elif e == "think":  # 「うーん」と上の右と左を交互に見る
+            side = 0.55 if (self.t // 1.1) % 2 else -0.55
+            goal = (side, -0.65 + 0.08 * math.sin(self.t * 2))
         elif e == "shy":
             goal = (-0.55 + 0.15 * math.sin(self.t * 1.3), 0.6)
         elif e == "dizzy":
@@ -372,6 +374,9 @@ class Face:
             dx += 0.8 * math.sin(t * 1.2)
         elif m == "sob":
             dy += 0.8 * abs(math.sin(t * 9)) if (t % 1.6) < 0.8 else 0
+        elif m == "ponder":  # 考え中: ゆっくり左右にかしげて、ときどき小さくうなる
+            dx += 1.2 * math.sin(t * 1.4)
+            dy -= 0.6 * abs(math.sin(t * 2.8))
         elif m == "sway":
             dx += 1.6 * math.sin(t * 2.6)
         ts = t - self.sign_start

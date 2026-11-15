@@ -672,9 +672,8 @@ class Conversation:
     def _on_unclear(self):
         """声はしたけれど聞き取れなかった。待っている相手に分かるようにする。"""
         thinking, self._thinking = self._thinking, False
-        if self.enroll and self.enroll.active:  # 名前を待っている: 声と字幕で聞きなおす
-            self.enroll.last = self.enroll.clock()
-            self._answer("confused", "ん？ きこえなかった。もういっかい いって？")
+        if self.enroll and self.enroll.active:  # 名前を待っている: 声と字幕で聞きなおす（何回かまで）
+            self.enroll.on_unclear(self._answer)
         elif thinking:  # 考える顔のまま固まらないように、首をかしげて終わる
             self.events.put(("confused", 1.5))
 
