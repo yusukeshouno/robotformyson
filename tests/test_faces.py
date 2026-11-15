@@ -438,8 +438,17 @@ def test_real_models_load_and_find_no_face_in_blank_image():
     assert e.faces(np.zeros((480, 640, 3), np.uint8)) == []
 
 
-def test_detector_input_is_multiple_of_32():
-    """OpenCV 4.6 の YuNet は縦横が 32 の倍数でないと落ちる（実機の Pi で 320x240 が失敗）。"""
+def test_old_opencv_uses_2022mar_model():
+    """Pi の OpenCV 4.6 は 2023mar を読めない（Layer id=-1 not found）ので 2022mar を使う。"""
+    assert fc.yunet_for("4.6.0") == "face_detection_yunet_2022mar.onnx"
+    assert fc.yunet_for("4.7.0") == "face_detection_yunet_2022mar.onnx"
+    assert fc.yunet_for("4.8.0") == "face_detection_yunet_2023mar.onnx"
+    assert fc.yunet_for("4.10.0") == "face_detection_yunet_2023mar.onnx"
+    assert fc.yunet_for("5.0.0-pre") == "face_detection_yunet_2023mar.onnx"
+
+
+def test_detector_keeps_image_size_and_scales_back():
+    """黒でうめると、ない顔を見つけてしまう（実機で 320x256 にしたら誤検出）ので、そのまま渡す。"""
     import cv2
     import numpy as np
 
@@ -450,7 +459,6 @@ def test_detector_input_is_multiple_of_32():
             sizes.append(size)
 
         def detect(self, img):
-            assert img.shape[1] % 32 == 0 and img.shape[0] % 32 == 0
             assert (img.shape[1], img.shape[0]) == sizes[-1]
             f = np.zeros((1, 15), np.float32)
             f[0, :4] = (10, 20, 30, 40)
@@ -459,5 +467,5 @@ def test_detector_input_is_multiple_of_32():
     e = object.__new__(fc.Embedder)
     e.cv2, e.detector, e.detect_width = cv2, Det(), 320
     found = e.faces(np.zeros((480, 640, 3), np.uint8))
-    assert sizes == [(320, 256)]
+    assert sizes == [(320, 240)]
     assert list(found[0][:4]) == [20, 40, 60, 80]   # 元の画像の座標に戻っている

@@ -34,7 +34,13 @@ import numpy as np
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 _ZOO = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/"
+# 古い OpenCV（4.8 より前。Pi OS Bookworm は 4.6）は 2023mar を読めないので、消される前の 2022mar を使う。
+_ZOO_2022 = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
+             "7e062e54cf5410c09b795ff71b4a255e58498c79/models/")
 MODELS = {  # ファイル名: (取ってくる場所, sha256)
+    "face_detection_yunet_2022mar.onnx": (
+        _ZOO_2022 + "face_detection_yunet/face_detection_yunet_2022mar.onnx",
+        "50ef07f702a31741ca46a4c0d947773b64143b9362780237bf0d427d6c79bab7"),
     "face_detection_yunet_2023mar.onnx": (
         _ZOO + "face_detection_yunet/face_detection_yunet_2023mar.onnx",
         "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"),
@@ -42,7 +48,16 @@ MODELS = {  # ファイル名: (取ってくる場所, sha256)
         _ZOO + "face_recognition_sface/face_recognition_sface_2021dec.onnx",
         "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"),
 }
-YUNET, SFACE = list(MODELS)
+YUNET_OLD, YUNET, SFACE = list(MODELS)
+
+
+def yunet_for(cv2_version):
+    """この OpenCV で動く顔検出モデルの名前。4.8 より前なら古い 2022mar。"""
+    try:
+        major, minor = (int(x) for x in cv2_version.split(".")[:2])
+    except ValueError:
+        return YUNET
+    return YUNET_OLD if (major, minor) < (4, 8) else YUNET
 
 MATCH = 0.40        # これ以上似ていたら同じ人（SFace のコサイン類似度。OpenCV の目安は 0.363）
 SAME_AS_OTHER = 0.50  # 登録しようとした顔が、別の人にこれ以上似ていたら登録しない
@@ -155,7 +170,7 @@ class Embedder:
 
     def __init__(self, model_dir=MODEL_DIR, detect_width=320):
         import cv2
-        paths = [os.path.join(model_dir, n) for n in (YUNET, SFACE)]
+        paths = [os.path.join(model_dir, n) for n in (yunet_for(cv2.__version__), SFACE)]
         for p in paths:
             if not os.path.exists(p):
                 raise RuntimeError(f"顔を見分けるモデルがありません: {p}"
@@ -170,12 +185,6 @@ class Embedder:
         h, w = frame.shape[:2]
         scale = min(1.0, self.detect_width / w)
         small = self.cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
-        # OpenCV 4.6（Pi OS Bookworm）の YuNet は、縦横が 32 の倍数でないと落ちる（240 → 256 に）。
-        # 右と下を黒でうめるだけなので、顔の座標は変わらない。
-        sh, sw = small.shape[:2]
-        pad_h, pad_w = (-sh) % 32, (-sw) % 32
-        if pad_h or pad_w:
-            small = self.cv2.copyMakeBorder(small, 0, pad_h, 0, pad_w, self.cv2.BORDER_CONSTANT)
         self.detector.setInputSize((small.shape[1], small.shape[0]))
         _, found = self.detector.detect(small)
         if found is None:
