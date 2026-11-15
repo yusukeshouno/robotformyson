@@ -436,3 +436,28 @@ def test_main_start_faces_without_camera_or_models(tmp_path, monkeypatch):
 def test_real_models_load_and_find_no_face_in_blank_image():
     e = fc.Embedder()
     assert e.faces(np.zeros((480, 640, 3), np.uint8)) == []
+
+
+def test_detector_input_is_multiple_of_32():
+    """OpenCV 4.6 の YuNet は縦横が 32 の倍数でないと落ちる（実機の Pi で 320x240 が失敗）。"""
+    import cv2
+    import numpy as np
+
+    sizes = []
+
+    class Det:
+        def setInputSize(self, size):
+            sizes.append(size)
+
+        def detect(self, img):
+            assert img.shape[1] % 32 == 0 and img.shape[0] % 32 == 0
+            assert (img.shape[1], img.shape[0]) == sizes[-1]
+            f = np.zeros((1, 15), np.float32)
+            f[0, :4] = (10, 20, 30, 40)
+            return 1, f
+
+    e = object.__new__(fc.Embedder)
+    e.cv2, e.detector, e.detect_width = cv2, Det(), 320
+    found = e.faces(np.zeros((480, 640, 3), np.uint8))
+    assert sizes == [(320, 256)]
+    assert list(found[0][:4]) == [20, 40, 60, 80]   # 元の画像の座標に戻っている

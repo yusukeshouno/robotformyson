@@ -170,6 +170,12 @@ class Embedder:
         h, w = frame.shape[:2]
         scale = min(1.0, self.detect_width / w)
         small = self.cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
+        # OpenCV 4.6（Pi OS Bookworm）の YuNet は、縦横が 32 の倍数でないと落ちる（240 → 256 に）。
+        # 右と下を黒でうめるだけなので、顔の座標は変わらない。
+        sh, sw = small.shape[:2]
+        pad_h, pad_w = (-sh) % 32, (-sw) % 32
+        if pad_h or pad_w:
+            small = self.cv2.copyMakeBorder(small, 0, pad_h, 0, pad_w, self.cv2.BORDER_CONSTANT)
         self.detector.setInputSize((small.shape[1], small.shape[0]))
         _, found = self.detector.detect(small)
         if found is None:
