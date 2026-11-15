@@ -482,7 +482,8 @@ class Voice:
 class WhisperClient:
     """Mac などで動かす Whisper の書き起こしサーバー（tools/whisper_server.py）に音を送る。
 
-    つながらないときは None を返し、30秒は送らない（そのあいだは Vosk の文字を使う）。
+    声ではなかったときは ""、つながらないときは None を返し、30秒は送らない
+    （そのあいだは Vosk の文字を使う）。
     """
 
     RETRY = 30.0
@@ -512,7 +513,7 @@ class WhisperClient:
             print(f"[書き起こし] つながらないので Vosk を使います（{e}）")
             self.down_until = self.clock() + self.RETRY
             return None
-        return text.replace(" ", "").replace("　", "").strip() or None
+        return text.replace(" ", "").replace("　", "").strip()  # "" = 声ではなかった
 
 
 def pick_rate(device=None, want=16000):
@@ -540,7 +541,7 @@ class Ears:
                  recognizer=None, transcriber=None):
         self.device = device
         self.gate = gate or MicGate()
-        # transcriber(pcm_bytes, rate) -> 文字 / None。Mac の Whisper など、より正確な書き起こし。
+        # transcriber(pcm_bytes, rate) -> 文字 / ""（声ではない）/ None（使えない）。Mac の Whisper など。
         # Vosk は「話しはじめ・話し終わり」を見つける係になり、文字は transcriber のものを使う。
         self.transcriber = transcriber
         self.buf = bytearray()
@@ -594,7 +595,7 @@ class Ears:
         audio, self.buf = bytes(self.buf), bytearray()
         if text and self.transcriber:  # Vosk が何か聞こえたときだけ送る（雑音は送らない）
             better = self.transcriber(audio, self.rate)
-            if better:
+            if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
                 text = better
         if text and self.gate.is_open() and self.gate.epoch == epoch:
             return text

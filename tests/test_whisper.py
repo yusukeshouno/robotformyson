@@ -71,8 +71,14 @@ def test_ears_skips_transcriber_on_silence_and_falls_back():
                    transcriber=lambda pcm, rate: calls.append(1) or None)
     assert ears.accept(b"\x00\x00" * 10) is None   # Vosk が何も聞いていない → 送らない
     assert calls == []
-    assert ears.accept(b"\x00\x00" * 10) == "こんにちは"  # Whisper がだめなら Vosk の文字
+    assert ears.accept(b"\x00\x00" * 10) == "こんにちは"  # Whisper がつながらないなら Vosk の文字
     assert calls == [1]
+
+
+def test_ears_drops_when_whisper_says_no_voice():
+    ears = cv.Ears(rate=16000, gate=MicGate(tail=0), recognizer=FakeRec(["ナンバーワン"]),
+                   transcriber=lambda pcm, rate: "")
+    assert ears.accept(b"\x00\x00" * 10) is None   # Vosk の当て推量で返事しない
 
 
 def _serve(handler_cls):
