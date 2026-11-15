@@ -145,3 +145,37 @@ def test_server_reads_and_resamples_wav():
     assert ws.voiced_seconds(talk) > 0.9
     noise = (np.random.default_rng(0).standard_normal(16000) * 0.007).astype(np.float32)
     assert ws.voiced_seconds(noise) < 0.1
+    # マイクの感度を下げたとき: 静かな部屋（0.001）で小さめの声（0.008）の名前を言う
+    quiet = (np.random.default_rng(1).standard_normal(32000) * 0.001).astype(np.float32)
+    quiet[8000:20000] += 0.011 * np.sin(np.arange(12000) / 4)
+    assert ws.voiced_seconds(quiet) > 0.5
+
+
+def test_ears_tells_listen_and_unclear():
+    heard, unclear = [], []
+    ears = cv.Ears(rate=16000, gate=MicGate(tail=0), recognizer=FakeRec(["ゆうと"]),
+                   transcriber=lambda pcm, rate: "")
+    ears.on_listen, ears.on_unclear = heard.append, lambda: unclear.append(1)
+    assert ears.accept(b"\x00\x00" * 10) is None
+    assert heard == ["ゆうと"] and unclear == [1]
+
+
+def test_conversation_thinks_early_and_asks_again_while_enrolling():
+    class Ears:
+        def mute(self, on):
+            pass
+
+    class Rec:
+        def person(self, pid):
+            return None
+
+    conv = cv.Conversation(None, ears=Ears(), faces=Rec(), wake_words=("イモ",))
+    ears = conv.ears
+    ears.on_listen("イモ こんにちは")                 # 話し終わってすぐ（書き起こしの前）
+    assert conv.poll() == [("think", 4)]
+    ears.on_unclear()                                # 聞き取れなかった → 首をかしげる
+    assert conv.poll() == [("confused", 1.5)]
+    conv.enroll.state, conv.enroll.last = "name", conv.enroll.clock()
+    ears.on_unclear()                                # 名前を待っている → 聞きなおす
+    ev = conv.poll()
+    assert ("caption", "ん？ きこえなかった。もういっかい いって？") in ev

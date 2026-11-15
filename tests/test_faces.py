@@ -1,3 +1,4 @@
+import time
 """顔をおぼえる機能のテスト（カメラ・モデルがなくても動く）。
 
 本物の顔の代わりに、FakeEmbedder が「画像に写っている人の番号」から決まった特徴を返す。
@@ -469,3 +470,34 @@ def test_detector_keeps_image_size_and_scales_back():
     found = e.faces(np.zeros((480, 640, 3), np.uint8))
     assert sizes == [(320, 240)]
     assert list(found[0][:4]) == [20, 40, 60, 80]   # 元の画像の座標に戻っている
+
+
+def test_enroll_dialog_shows_progress_while_capturing():
+    import threading as th
+
+    class Rec:
+        def __init__(self):
+            self.done, self.n = th.Event(), 0
+
+        def enroll(self, name):
+            def run():
+                for i in range(1, 4):
+                    time.sleep(0.35)
+                    self.n = i
+                self.done.set()
+            th.Thread(target=run, daemon=True).start()
+            return self.done
+
+        def enroll_progress(self):
+            return None if self.done.is_set() else (self.n, 3)
+
+        def enroll_result(self):
+            return ("ok", "p1")
+
+    shown, said = [], []
+    d = fc.EnrollDialog(Rec(), show=shown.append)
+    d.name = "ゆうと"
+    d._capture(lambda emo, text: said.append(text))
+    assert shown[0] == "ゆうと、カメラを みてね ○○○"
+    assert any("●○○" in s for s in shown)
+    assert said[-1] == "おぼえたよ！ よろしくね、ゆうと！"

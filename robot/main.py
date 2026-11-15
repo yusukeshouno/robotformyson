@@ -367,8 +367,8 @@ def main(argv=None):
             talk += (conv.mouth_level() - talk) * 0.6
             face.set_talk(talk)
             if caption:
-                if talk > 0.05:
-                    caption.hold(now)
+                if talk > 0.05 or (conv.enroll and conv.enroll.active):
+                    caption.hold(now)  # 話している間と、顔の登録で答えを待っている間は消さない
                 caption.update(now)
 
         emotion = engine.update(now)

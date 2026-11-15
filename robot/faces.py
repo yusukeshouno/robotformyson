@@ -476,8 +476,9 @@ class EnrollDialog:
 
     TIMEOUT = 40.0   # この秒数だまっていたら、やりとりをやめる
 
-    def __init__(self, recognizer, clock=time.monotonic):
+    def __init__(self, recognizer, clock=time.monotonic, show=None):
         self.rec, self.clock = recognizer, clock
+        self.show = show   # show(字幕)。撮っている途中の進み具合を画面に出す（スピーカーがなくても分かる）
         self.state, self.name, self.tries, self.last = None, None, 0, 0.0
 
     @property
@@ -528,11 +529,24 @@ class EnrollDialog:
         self._go("confirm")
         speak("joy", f"{name}、で あってる？")
 
+    def _wait_with_progress(self, name, done):
+        """撮りおわるまで待つ。そのあいだ「カメラを みてね ●●○○○」を出す。"""
+        progress = getattr(self.rec, "enroll_progress", None)
+        if self.show is None or progress is None or done is None:
+            return self.rec.wait_enroll() or ("noface", None)
+        shown, until = None, time.monotonic() + 15
+        while not done.wait(0.3) and time.monotonic() < until:
+            p = progress()
+            if p and p != shown:
+                shown = p
+                self.show(f"{name}、カメラを みてね {'●' * p[0]}{'○' * (p[1] - p[0])}")
+        return self.rec.enroll_result() or ("noface", None)
+
     def _capture(self, speak):
         name, self.state = self.name, None
         speak("excited", f"{name}、カメラを みて にっこりしてね！")
-        self.rec.enroll(name)
-        result = self.rec.wait_enroll() or ("noface", None)
+        done = self.rec.enroll(name)
+        result = self._wait_with_progress(name, done)
         if result[0] == "ok":
             speak("love", f"おぼえたよ！ よろしくね、{name}！")
         elif result[0] == "other":

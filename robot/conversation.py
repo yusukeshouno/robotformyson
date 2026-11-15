@@ -557,6 +557,10 @@ class Ears:
         self.rec = recognizer
         self.q = queue.Queue()
         self._epoch = self.gate.epoch
+        # on_listen(vosk の文字): 話し終わったのが分かった瞬間（書き起こしを待つ前）に呼ぶ。考える顔を早く出すため
+        # on_unclear(): 声はしたのに書き起こしが「声ではない」と言ったときに呼ぶ
+        self.on_listen = None
+        self.on_unclear = None
 
     def mute(self, on):
         """on=True で閉じる。False で開く（実際に聞きはじめるのは余韻の時間のあと）。"""
@@ -593,10 +597,14 @@ class Ears:
             return None
         text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
         audio, self.buf = bytes(self.buf), bytearray()
+        if text and self.on_listen:
+            self.on_listen(text)
         if text and self.transcriber:  # Vosk が何か聞こえたときだけ送る（雑音は送らない）
             better = self.transcriber(audio, self.rate)
             if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
                 text = better
+                if not text and self.on_unclear:
+                    self.on_unclear()
         if text and self.gate.is_open() and self.gate.epoch == epoch:
             return text
         return None
@@ -646,10 +654,29 @@ class Conversation:
         self.enroll = None
         if faces is not None:
             from .faces import EnrollDialog
-            self.enroll = EnrollDialog(faces)
+            self.enroll = EnrollDialog(faces, show=lambda t: self.events.put(("caption", t)))
         self.events = queue.Queue()
         self.last_reply = 0.0
         self._speak_lock = threading.Lock()
+        self._thinking = False
+        if ears is not None:
+            ears.on_listen = self._on_listen
+            ears.on_unclear = self._on_unclear
+
+    def _on_listen(self, rough_text):
+        """話し終わった直後（文字になる前）。返事をしそうなら、すぐ考える顔にする。"""
+        self._thinking = self.should_reply(rough_text)
+        if self._thinking:
+            self.events.put(("think", 4))
+
+    def _on_unclear(self):
+        """声はしたけれど聞き取れなかった。待っている相手に分かるようにする。"""
+        thinking, self._thinking = self._thinking, False
+        if self.enroll and self.enroll.active:  # 名前を待っている: 声と字幕で聞きなおす
+            self.enroll.last = self.enroll.clock()
+            self._answer("confused", "ん？ きこえなかった。もういっかい いって？")
+        elif thinking:  # 考える顔のまま固まらないように、首をかしげて終わる
+            self.events.put(("confused", 1.5))
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -676,8 +703,12 @@ class Conversation:
     def handle(self, text):
         if not self.should_reply(text):
             print(f"[聞こえた（無視）] {text}")
+            if self._thinking:
+                self._thinking = False
+                self.events.put(("neutral", 0.5))
             return None
         print(f"[聞こえた] {text}")
+        self._thinking = False
         self.events.put(("heard", 0))
         gesture = gesture_for(text)
         if gesture:
