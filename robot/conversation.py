@@ -479,6 +479,17 @@ class Voice:
 
 
 # ---------------------------------------------------------------- 聞く
+def pick_rate(device=None, want=16000):
+    """録音のサンプリングレート。音声認識モデルは 16kHz 用なので、録れるなら 16kHz で録る
+    （44.1kHz を渡すと Vosk の中で変換が1回ふえ、聞き取りが少し悪くなる）。"""
+    import sounddevice as sd
+    try:
+        sd.check_input_settings(device=device, samplerate=want, channels=1, dtype="int16")
+        return want
+    except Exception:
+        return int(sd.query_devices(device, "input")["default_samplerate"])
+
+
 class Ears:
     """マイクの音を Vosk で文字にする。
 
@@ -496,8 +507,7 @@ class Ears:
             if not os.path.isdir(model_path):
                 raise RuntimeError(f"音声認識モデルがありません: {model_path}（README 参照）")
             if rate is None:
-                import sounddevice as sd
-                rate = int(sd.query_devices(device, "input")["default_samplerate"])
+                rate = pick_rate(device)
             recognizer = KaldiRecognizer(Model(model_path), rate)
         self.rate = rate or 16000
         self.rec = recognizer
