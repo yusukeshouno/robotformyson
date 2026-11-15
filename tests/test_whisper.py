@@ -155,9 +155,9 @@ def test_ears_tells_listen_and_unclear():
     heard, unclear = [], []
     ears = cv.Ears(rate=16000, gate=MicGate(tail=0), recognizer=FakeRec(["ゆうと"]),
                    transcriber=lambda pcm, rate: "")
-    ears.on_listen, ears.on_unclear = heard.append, lambda: unclear.append(1)
+    ears.on_listen, ears.on_unclear = heard.append, unclear.append
     assert ears.accept(b"\x00\x00" * 10) is None
-    assert heard == ["ゆうと"] and unclear == [1]
+    assert heard == ["ゆうと"] and unclear == ["ゆうと"]
 
 
 def test_conversation_thinks_early_and_asks_again_while_enrolling():
@@ -208,3 +208,26 @@ def test_ears_does_not_send_plain_noise_when_vosk_hears_nothing():
     ears = cv.Ears(rate=16000, gate=MicGate(tail=0), recognizer=FakeRec([None] * 29 + [""]),
                    transcriber=lambda pcm, rate: got.append(1) or "x")
     assert [ears.accept(c) for c in seq][-1] is None and got == []
+
+
+def test_short_yes_uses_vosk_guess_while_confirming_name():
+    """実機: 「チーチ、で あってる？」→「うん」が Whisper で空になり、登録が進まなかった。"""
+    class Ears:
+        def mute(self, on):
+            pass
+
+    class Rec:
+        def __init__(self):
+            self.names = []
+
+        def enroll(self, name):
+            self.names.append(name)
+
+        def wait_enroll(self):
+            return ("ok", "p1")
+
+    rec = Rec()
+    conv = cv.Conversation(None, ears=Ears(), faces=rec)
+    conv.enroll.state, conv.enroll.name, conv.enroll.last = "confirm", "チーチ", conv.enroll.clock()
+    conv.ears.on_unclear("うん")
+    assert rec.names == ["チーチ"]

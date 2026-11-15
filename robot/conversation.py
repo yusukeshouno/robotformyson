@@ -30,6 +30,7 @@ import numpy as np
 from .arms import gesture_for
 from .audio import (AudioSettings, MicGate, add_audio_args, output_channels, resolve_device,
                     to_channels)
+from .faces import is_no, is_yes
 from .memory import wants_forget
 
 DEFAULT_MODEL = "claude-opus-5-5"            # Claude を使うとき
@@ -604,6 +605,7 @@ class Ears:
         text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
         audio, self.buf = bytes(self.buf), bytearray()
         # Vosk が文字にできなくても、雑音よりはっきり大きい音が 0.3 秒以上あれば、小さな声かもしれない
+        rough = text  # Vosk の当て推量（「うん」のような短い返事は Whisper が空にしやすい）
         maybe_voice = self._loud_bytes >= int(self.rate * 0.3) * 2
         self._loud_bytes = 0
         if text and self.on_listen:
@@ -613,7 +615,7 @@ class Ears:
             if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
                 text = better
                 if not text and self.on_unclear:
-                    self.on_unclear()
+                    self.on_unclear(rough)
         if text and self.gate.is_open() and self.gate.epoch == epoch:
             return text
         return None
@@ -696,10 +698,16 @@ class Conversation:
         if self._thinking:
             self.events.put(("think", 4))
 
-    def _on_unclear(self):
-        """声はしたけれど聞き取れなかった。待っている相手に分かるようにする。"""
+    def _on_unclear(self, rough=""):
+        """声はしたけれど聞き取れなかった。待っている相手に分かるようにする。
+
+        顔の登録で「あってる？」と聞いたあとは、Vosk が「うん」「ちがう」と聞いていればそれを使う。
+        """
         thinking, self._thinking = self._thinking, False
-        if self.enroll and self.enroll.active:  # 名前を待っている: 声と字幕で聞きなおす（何回かまで）
+        if (self.enroll and self.enroll.active and self.enroll.state == "confirm" and rough
+                and (is_yes(rough) or is_no(rough))):
+            self.handle(rough)
+        elif self.enroll and self.enroll.active:  # 名前を待っている: 声と字幕で聞きなおす（何回かまで）
             self.enroll.on_unclear(self._answer)
         elif thinking:  # 考える顔のまま固まらないように、首をかしげて終わる
             self.events.put(("confused", 1.5))
