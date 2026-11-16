@@ -84,6 +84,8 @@ def parse_args(argv=None):
                     help="Ollama の場所（Mac で動かすなら http://<Macの名前>.local:11434）")
     ap.add_argument("--model", default=None, help="使うモデル名")
     ap.add_argument("--vosk-model", default=None, help="音声認識モデルのフォルダ")
+    ap.add_argument("--always-reply", action="store_true",
+                    help="カメラに顔が見えていなくても返事する（ふつうは顔が見えるか「イモ」と呼んだときだけ）")
     ap.add_argument("--no-vad", action="store_true",
                     help="話の区切りを Silero VAD ではなく Vosk で見つける")
     ap.add_argument("--whisper-url", default=None,
@@ -165,8 +167,8 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
         print(f"会話機能を使わずに起動します（{e}）")
         return None
     attended = None
-    if tracker:  # カメラがあれば、顔が見えている（10秒以内）ときだけ返事する
-        attended = lambda: time.monotonic() - last_face[0] < 10.0  # noqa: E731
+    if tracker and not args.always_reply:  # カメラがあれば、顔が見えている（30秒以内）ときだけ返事する
+        attended = lambda: time.monotonic() - last_face[0] < 30.0  # noqa: E731
     conv = cv.Conversation(brain, voice, ears, get_image=tracker.jpeg if tracker else None,
                            is_attended=attended, wake_words=(args.name,),
                            faces=faces, memory=memory, language=language).start()
@@ -331,6 +333,8 @@ def main(argv=None):
                                     args.screen_rotate)
             present = abs(fx) <= 1 and abs(fy) <= 1
         if present:
+            if now - last_face[0] > 30.0:
+                print("[顔] 見えた")  # 返事をする・しないの理由がログで分かるように
             last_face[0] = now
         engine.on_face(present, now)
         if growth:
