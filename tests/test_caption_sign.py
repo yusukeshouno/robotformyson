@@ -77,3 +77,28 @@ def test_mouth_never_crashes():
             f.params["mouth_w"] = float(w)
             f.set_talk(float(w) % 1)
             f.render()
+
+
+def test_wake_word_variants_and_just_call():
+    from robot import conversation as cv
+    words = cv.wake_variants("イモ")
+    assert "芋" in words
+    assert cv.contains_any("芋、あそぼう", words) and cv.contains_any("いも、あそぼう", words)
+    for t in ("イモ", "いもー", "ねえ、イモ！", "芋", "イモちゃん"):
+        assert cv.is_just_call(t, words), t
+    assert not cv.is_just_call("イモ、りんごすき？", words)
+
+
+def test_just_call_answers_without_thinking_and_opens_follow_up():
+    from robot import conversation as cv
+
+    class Brain:
+        calls = 0
+
+        def reply(self, text, image=None):
+            Brain.calls += 1
+            return "joy", "うん"
+
+    conv = cv.Conversation(Brain(), is_attended=lambda: False, wake_words=("イモ",))
+    assert conv.handle("芋") is not None and Brain.calls == 0
+    assert conv.handle("きょうは なにする") is not None and Brain.calls == 1   # 呼ばれたあとは顔がなくても聞く

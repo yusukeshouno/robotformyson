@@ -80,6 +80,23 @@ def normalize(text):
     return "".join(chr(ord(ch) - 0x60) if "ァ" <= ch <= "ヶ" else ch for ch in text)
 
 
+# 名前の書き方のちがい（Whisper は「芋」と漢字で書くこともある）
+NAME_ALIASES = {"いも": ("芋",), "ぴこ": ()}
+
+
+def wake_variants(name):
+    """呼ばれたと分かる言葉: 名前（カタカナ・ひらがなは normalize でそろう）と、その漢字など。"""
+    return (name,) + NAME_ALIASES.get(normalize(name), ())
+
+
+def is_just_call(text, words):
+    """「イモ」「いもー」「ねえ、イモ」のように、名前を呼んだだけか。"""
+    t = re.sub(r"[\s、。,.!?！？ー〜~っ]", "", normalize(text))
+    for w in words:
+        t = t.replace(normalize(w), "")
+    return t in ("", "ねえ", "ねぇ", "おい", "あの", "あのね", "ちゃん", "くん", "さん")
+
+
 def contains_any(text, words):
     t = normalize(text)
     return any(normalize(w) in t for w in words)
@@ -712,7 +729,7 @@ class Conversation:
         self.language = language          # Language（話し方に合わせる。数字だけ数える）/ None
         self.get_image = get_image        # () -> JPEG bytes / None
         self.is_attended = is_attended    # () -> 人がこちらを見ているか
-        self.wake_words = tuple(wake_words)
+        self.wake_words = tuple(v for w in wake_words for v in wake_variants(w))
         self.faces = faces                # FaceRecognizer（顔をおぼえる機能）/ None
         self.enroll = None
         if faces is not None:
@@ -744,7 +761,12 @@ class Conversation:
         顔の登録で「あってる？」と聞いたあとは、Vosk が「うん」「ちがう」と聞いていればそれを使う。
         """
         thinking, self._thinking = self._thinking, False
-        if (self.enroll and self.enroll.active and self.enroll.state == "confirm" and rough
+        if (rough and self.wake_words and contains_any(rough, self.wake_words)
+                and not (self.enroll and self.enroll.active)):
+            # 「イモ…」と呼ばれたのに、そのあとが聞き取れなかった: 呼ばれたことには答えて、もう一度聞く
+            self.events.put(("heard", 0))
+            self._answer("confused", "ん？ よんだ？ もういっかい いって？")
+        elif (self.enroll and self.enroll.active and self.enroll.state == "confirm" and rough
                 and (is_yes(rough) or is_no(rough))):
             self.handle(rough)
         elif self.enroll and self.enroll.active:  # 名前を待っている: 声と字幕で聞きなおす（何回かまで）
@@ -766,10 +788,10 @@ class Conversation:
     def should_reply(self, text):
         if self.enroll and self.enroll.active:  # 顔の登録の途中（「うん」も聞く）
             return True
+        if contains_any(text, self.wake_words):  # 「芋」1文字でも呼ばれたことになる
+            return True
         if len(text) < 2:
             return False
-        if contains_any(text, self.wake_words):
-            return True
         if time.monotonic() - self.last_reply < self.FOLLOW_UP:
             return True
         return self.is_attended is None or self.is_attended()
@@ -783,6 +805,12 @@ class Conversation:
             return None
         print(f"[聞こえた] {text}")
         self._thinking = False
+        if (self.wake_words and is_just_call(text, self.wake_words)
+                and not (self.enroll and self.enroll.active)):
+            # 名前を呼ばれただけ: 考えずにすぐ「なあに？」。そのあと少しのあいだは顔が見えなくても聞く
+            self.events.put(("heard", 0))
+            self._answer("excited", random.choice(("なあに？", "はーい！", "よんだ？")))
+            return "excited", "なあに？"
         self.events.put(("heard", 0))
         gesture = gesture_for(text)
         if gesture:
