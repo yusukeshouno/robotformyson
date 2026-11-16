@@ -231,3 +231,17 @@ def test_short_yes_uses_vosk_guess_while_confirming_name():
     conv.enroll.state, conv.enroll.name, conv.enroll.last = "confirm", "チーチ", conv.enroll.clock()
     conv.ears.on_unclear("うん")
     assert rec.names == ["チーチ"]
+
+
+def test_bare_name_kept_only_when_sure():
+    """実機: 「イモ」とだけ呼ぶと、ヒント（PROMPT）の写しとみなして捨てていた。"""
+    path = Path(__file__).resolve().parent.parent / "tools" / "whisper_server.py"
+    spec = importlib.util.spec_from_file_location("ws", path)
+    ws = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ws)
+    sure = [{"text": "イモ!", "no_speech_prob": 0.05, "avg_logprob": -0.3, "compression_ratio": 1.0}]
+    unsure = [{"text": "イモ", "no_speech_prob": 0.45, "avg_logprob": -0.9, "compression_ratio": 1.0}]
+    assert ws.clean("イモ!", sure_name=ws.name_is_sure(sure, 0.6)) == "イモ"
+    assert ws.clean("イモ", sure_name=ws.name_is_sure(unsure, 0.6)) == ""
+    assert ws.clean("イモ!", sure_name=ws.name_is_sure(sure, 0.1)) == ""    # 声が短すぎる
+    assert ws.clean("イモ、おはよう") == "イモ、おはよう"

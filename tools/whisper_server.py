@@ -85,9 +85,16 @@ def read_wav(data):
     return x
 
 
-def clean(text):
+def is_just_name(text):
+    return text.strip().strip("。、!?！？ ー〜") in (PROMPT, "いも", "芋")
+
+
+def clean(text, sure_name=False):
+    """sure_name: 名前だけ（「イモ！」）でも、自信があって声も長めなら残す（呼ばれただけのとき）。"""
     t = text.strip()
-    if t.strip("。、!?！？ ") == PROMPT or repetitive(t):
+    if is_just_name(t):
+        return PROMPT if sure_name else ""   # ふつうは、名前だけはヒントの写しとみなして捨てる
+    if repetitive(t):
         return ""
     for h in HALLUCINATIONS:
         if h in t:
@@ -99,6 +106,12 @@ def keep_segment(s):
     """自信のない区切り（音がない・同じことのくり返し）を捨てる。"""
     return (s.get("no_speech_prob", 0) < 0.5 and s.get("avg_logprob", 0) > -1.0
             and s.get("compression_ratio", 0) < 2.4)
+
+
+def name_is_sure(kept, voiced):
+    """名前だけ聞こえたとき、本当に呼ばれたと言えるか（ヒントの写しではなく）。"""
+    return (voiced >= 0.3 and len(kept) == 1 and kept[0].get("no_speech_prob", 1) < 0.3
+            and kept[0].get("avg_logprob", -9) > -0.6)
 
 
 class Engine:
@@ -116,19 +129,22 @@ class Engine:
             self.fw = WhisperModel(self.model, compute_type="int8")
 
     def transcribe(self, audio):
+        """(文字, 自信がいちばんある区切りの情報) を返す。"""
         with self.lock:
             if self.kind == "mlx":
                 r = self.mlx.transcribe(audio, path_or_hf_repo=self.model, language="ja",
                                         temperature=0.0, condition_on_previous_text=False,
                                         initial_prompt=PROMPT, verbose=None)
-                segs = r.get("segments", [])
-                return "".join(s["text"] for s in segs if keep_segment(s))
-            segs, _ = self.fw.transcribe(audio, language="ja", beam_size=1, temperature=0.0,
-                                         condition_on_previous_text=False, initial_prompt=PROMPT,
-                                         vad_filter=False)
-            return "".join(s.text for s in segs if keep_segment(
-                {"no_speech_prob": s.no_speech_prob, "avg_logprob": s.avg_logprob,
-                 "compression_ratio": s.compression_ratio}))
+                segs = [dict(s) for s in r.get("segments", [])]
+            else:
+                out, _ = self.fw.transcribe(audio, language="ja", beam_size=1, temperature=0.0,
+                                            condition_on_previous_text=False, initial_prompt=PROMPT,
+                                            vad_filter=False)
+                segs = [{"text": s.text, "no_speech_prob": s.no_speech_prob,
+                         "avg_logprob": s.avg_logprob, "compression_ratio": s.compression_ratio}
+                        for s in out]
+        kept = [s for s in segs if keep_segment(s)]
+        return "".join(s["text"] for s in kept), kept
 
 
 def make_handler(engine):
@@ -162,7 +178,8 @@ def make_handler(engine):
                 print(f"[{len(audio) / RATE:4.1f}秒] 声がないので書き起こさない"
                       f"（いちばん大きい所 {loudest(audio):.4f}）", flush=True)
                 return self._send(200, {"text": ""})
-            text = clean(engine.transcribe(audio))
+            raw, kept = engine.transcribe(audio)
+            text = clean(raw, sure_name=name_is_sure(kept, voiced_seconds(audio)))
             print(f"[{len(audio) / RATE:4.1f}秒 → {time.monotonic() - t0:4.2f}秒] {text}", flush=True)
             self._send(200, {"text": text})
 
