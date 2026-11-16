@@ -110,7 +110,7 @@ def keep_segment(s):
 
 def name_is_sure(kept, voiced):
     """名前だけ聞こえたとき、本当に呼ばれたと言えるか（ヒントの写しではなく）。"""
-    return (voiced >= 0.3 and len(kept) == 1 and kept[0].get("no_speech_prob", 1) < 0.3
+    return (voiced >= MIN_VOICE and len(kept) == 1 and kept[0].get("no_speech_prob", 1) < 0.3
             and kept[0].get("avg_logprob", -9) > -0.6)
 
 

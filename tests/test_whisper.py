@@ -242,6 +242,7 @@ def test_bare_name_kept_only_when_sure():
     sure = [{"text": "イモ!", "no_speech_prob": 0.05, "avg_logprob": -0.3, "compression_ratio": 1.0}]
     unsure = [{"text": "イモ", "no_speech_prob": 0.45, "avg_logprob": -0.9, "compression_ratio": 1.0}]
     assert ws.clean("イモ!", sure_name=ws.name_is_sure(sure, 0.6)) == "イモ"
+    assert ws.clean("イモー", sure_name=ws.name_is_sure(sure, 0.27)) == "イモ"  # 実機: はっきりした「イモ」は約0.27秒
     assert ws.clean("イモ", sure_name=ws.name_is_sure(unsure, 0.6)) == ""
-    assert ws.clean("イモ!", sure_name=ws.name_is_sure(sure, 0.1)) == ""    # 声が短すぎる
+    assert ws.clean("イモ!", sure_name=ws.name_is_sure(sure, 0.1)) == ""    # 声が短すぎる（MIN_VOICE 0.15 未満）
     assert ws.clean("イモ、おはよう") == "イモ、おはよう"
