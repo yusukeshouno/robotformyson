@@ -266,6 +266,7 @@ def main(argv=None):
 
     last_face = [0.0]
     conv = None
+    pending_caption = None
     if args.talk:
         conv = start_conversation(args, tracker, last_face, growth, faces, memory, language)
 
@@ -363,8 +364,8 @@ def main(argv=None):
                         arms.perk()
                     continue
                 if emo == "caption":  # 字幕はイモの返事だけ
-                    if caption:
-                        caption.say(dur, now)
+                    if caption:  # 答えが出た電球（頭の上）が見えるよう、少しおくらせて出す
+                        pending_caption = (dur, now + 0.8)
                     continue
                 if emo == "listen":  # 話し終わってすぐの考える顔（字幕はそのまま）
                     emo = "think"
@@ -378,6 +379,9 @@ def main(argv=None):
                 else:
                     engine.express(emo, dur, now)
                     engine.set_mood(emo, now)
+            if pending_caption and now >= pending_caption[1]:
+                caption.say(pending_caption[0], now)
+                pending_caption = None
             talk += (conv.mouth_level() - talk) * 0.6
             face.set_talk(talk)
             if caption:

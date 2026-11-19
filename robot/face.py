@@ -60,10 +60,13 @@ EMOTIONS = {
                "motion": "breathe", "fx": ("zzz",)},
     "love": {"scale": 1.1, "mouth": 0.8, "mouth_open": 0.25, "blush": 1.0,
              "color": (255, 120, 190), "eyes": ("heart", "heart"), "fx": ("hearts",)},
-    # 返事を考えているあいだ：目を細めて、上の右・左をきょろきょろ見ながら、首をかしげてゆれる
-    "think": {"open": 0.85, "scale": 0.95, "lid_bot": 0.2, "mouth": -0.1, "mouth_w": 0.6,
+    # 返事を考えているあいだ（顔全体で考える。くわしい動きは Face の THINK_* と _think_stage）
+    #   はじめ: 上の右・左をゆっくり見て、まばたきが増える（思い出すしぐさ）
+    #   長くなると: 片目を細め、口を「むー」と横に動かし、首をかしげる。頭の上に「ぽわぽわ」
+    #   答えが出たら: 頭の上で電球が「ぴかっ」
+    "think": {"open": 0.9, "scale": 0.95, "lid_bot": 0.15, "mouth": -0.1, "mouth_w": 0.6,
               "brow": 0.7, "brow_skew": 0.6, "color": (110, 200, 255), "motion": "ponder",
-              "fx": ("dots",)},
+              "fx": ("bubbles",)},
     # ここから下はピクセルアート化で増やした表情
     "shy": {"open": 0.8, "scale": 0.92, "lid_bot": 0.35, "mouth": 0.2, "wavy": 1.0,
             "mouth_w": 0.6, "blush": 1.0, "color": (150, 210, 255), "motion": "fidget"},
@@ -158,6 +161,21 @@ SPR_SPARKLE_SMALL = _sprite(".#.", "#w#", ".#.")
 SPR_DROP = _sprite(".#.", "###", "###", ".#.")
 SPR_QUESTION = _sprite(".###.", "#...#", "....#", "..##.", "..#..", ".....", "..#..")
 SPR_EXCLAIM = _sprite("##", "##", "##", "##", "..", "##")
+SPR_BUBBLE = _sprite(".##.", "#..#", "#..#", ".##.")
+SPR_BUBBLE_SMALL = _sprite("##", "##")
+SPR_BULB = _sprite(        # 電球（ひらめいた！）
+    "..###..",
+    ".#####.",
+    "##w####",
+    "##w####",
+    "#######",
+    ".#####.",
+    "..###..",
+    "..sss..",
+    "..sss..",
+)
+SPR_RAY_H = _sprite("##")
+SPR_RAY_V = _sprite("#", "#")
 SPR_VEIN = _sprite(".#..#.", "##..##", "......", "##..##", ".#..#.")
 SPR_MARU = _sprite(        # 〇（はい）
     "...#####...",
@@ -210,6 +228,10 @@ def dot_grid(w, h, nx, ny):
     return g
 
 
+THINK_HMM = 2.5     # 考えはじめてこの秒数たつと「うーん」の顔になる
+BULB_SECONDS = 0.9  # 答えが出たときの電球を出しておく秒数
+
+
 class Face:
     def __init__(self, size):
         self.size = size
@@ -233,14 +255,24 @@ class Face:
         self.eyes = ("normal", "normal")  # いま描いている目の形
         self.swap_start = -1.0        # 目の形を入れかえるまばたきの開始時刻
         self.sign_kind, self.sign_start = None, -10.0  # はい・いいえ（うなずく / 首をふる、〇×）
+        self.bulb_start = -10.0       # 考えおわって答えが出た時刻（電球ぴかっ）
         self.lo = pygame.Surface((N, N))
         self.grid = None
         self._ys, self._xs = np.mgrid[0:N, 0:N] + 0.5
 
     def set_emotion(self, name):
         if name in EMOTIONS and name != self.emotion:
+            if (self.emotion == "think" and name not in ("neutral", "sleepy")
+                    and self.t - self.entered > 0.6):
+                self.bulb_start = self.t      # 考えていて、答えが出た
             self.emotion = name
             self.entered = self.t
+
+    def _think_stage(self):
+        """考え中の段階: None（考えていない）/ "recall"（思い出す）/ "hmm"（うーん）。"""
+        if self.emotion != "think":
+            return None
+        return "hmm" if self.t - self.entered >= THINK_HMM else "recall"
 
     def sign(self, kind):
         """kind='yes' でうなずいて〇、'no' で首をふって×を出す。"""
@@ -310,9 +342,12 @@ class Face:
         e = self.emotion
         if e == "sleepy":
             goal = (0.0, 0.3)
-        elif e == "think":  # 「うーん」と上の右と左を交互に見る
-            side = 0.55 if (self.t // 1.1) % 2 else -0.55
-            goal = (side, -0.65 + 0.08 * math.sin(self.t * 2))
+        elif e == "think":
+            if self._think_stage() == "recall":  # 上の右と左を、ゆっくり交互に見る
+                side = 0.6 if (self.t // 1.1) % 2 else -0.6
+                goal = (side, -0.7 + 0.08 * math.sin(self.t * 2))
+            else:                                # 「うーん」: 片方の上をじっと見る
+                goal = (0.5 + 0.08 * math.sin(self.t * 0.9), -0.55)
         elif e == "shy":
             goal = (-0.55 + 0.15 * math.sin(self.t * 1.3), 0.6)
         elif e == "dizzy":
@@ -330,9 +365,11 @@ class Face:
 
         if self.t >= self.next_blink and self.emotion != "sleepy":
             self.blink_start = self.t
-            # たまに二回まばたき
-            self.next_blink = self.t + (0.35 if random.random() < 0.15
-                                        else random.uniform(2.5, 6.0))
+            if self._think_stage() == "recall":   # 思い出しているときは、まばたきが増える
+                self.next_blink = self.t + random.uniform(0.7, 1.4)
+            else:  # たまに二回まばたき
+                self.next_blink = self.t + (0.35 if random.random() < 0.15
+                                            else random.uniform(2.5, 6.0))
 
     def _blink_factor(self):
         """まばたき（すばやく閉じて、少しゆっくり開く）と、目の形の入れかえ。"""
@@ -454,9 +491,10 @@ class Face:
         p = self.params
         gx, gy = self.gaze
         cx = 24 + side * 10 + round(gx * 3) + dx
-        cy = 20 + round(gy * 2) + dy
+        cy = 20 + round(gy * 2) + dy + self._tilt(side)
         size = p["scale"] * pop * (1 + p["skew"] * -side) * (1 + 0.08 * gx * side)
         cols = {"#": self.c_main, "w": self.c_hi, "s": self.c_shade}
+        squint = self._squint(side)
 
         if shape != "normal":
             squash = blink if shape not in NO_BLINK else 1.0
@@ -477,7 +515,7 @@ class Face:
             return
 
         b_full = 7 * size
-        b = b_full * p["open"] * blink
+        b = b_full * p["open"] * blink * squint
         a = 5.5 * size
         if b < 0.9:  # 閉じた目は横一本線（少し下に弧）
             for x in range(round(cx - a + 1), round(cx + a - 1)):
@@ -505,6 +543,24 @@ class Face:
                 if 0 <= hy + oy < N and 0 <= hx + ox < N and mask[hy + oy, hx + ox]:
                     self.img[hy + oy, hx + ox] = self.c_hi
 
+    def _hmm(self):
+        """「うーん」の強さ 0..1（考えはじめて THINK_HMM 秒から 0.6 秒かけて強くなる）。"""
+        if self._think_stage() != "hmm":
+            return 0.0
+        return min(1.0, (self.t - self.entered - THINK_HMM) / 0.6)
+
+    def _tilt(self, side):
+        """首をかしげる: 左右の目の高さをずらす（ゆっくり左右に）。"""
+        h = self._hmm()
+        if h <= 0:
+            return 0
+        lean = 1 if math.sin(self.t * 0.7) >= 0 else -1
+        return round(h * 1.4 * side * lean)
+
+    def _squint(self, side):
+        """「うーん」: 画面右の目を細める。"""
+        return 1 - 0.55 * self._hmm() if side > 0 else 1.0
+
     def _draw_spiral(self, cx, cy, size):
         rot = self.t * 6
         turns = 2.6
@@ -524,7 +580,7 @@ class Face:
         gx, gy = self.gaze
         for side in (-1, 1):
             cx = 24 + side * 10 + round(gx * 3) + dx
-            base = 20 + round(gy * 2) + dy - 7 * p["scale"] - 3 - p["brow_y"] * 2
+            base = 20 + round(gy * 2) + dy - 7 * p["scale"] - 3 - p["brow_y"] * 2 + self._tilt(side)
             base -= p["brow_skew"] * 1.5 * -side
             for i in range(-3, 4):
                 u_in = i / 3 * -side
@@ -536,6 +592,9 @@ class Face:
         gx, gy = self.gaze
         mx = 24 + round(gx * 1.5) + dx
         my = 35 + round(gy) + dy
+        h = self._hmm()
+        if h > 0:  # 「むー」: 口を小さくとがらせて、左右にもごもご動かす
+            mx += round(h * 2.5 * math.sin(self.t * 2.4))
         if p["round"] > 0.5:   # o の口
             r = p["round"]
             X, Y = self._xs, self._ys
@@ -544,7 +603,7 @@ class Face:
             self.img[d <= 1] = self.c_main
             self.img[d <= 0.35] = self.c_dark
             return
-        hw = 5.5 * p["mouth_w"]
+        hw = 5.5 * p["mouth_w"] * (1 - 0.35 * h)
         curve = p["mouth"] * 3.2
         opening = (p["mouth_open"] + self.talk * 0.9) * 4.5
         prev = None
@@ -585,8 +644,39 @@ class Face:
         fade = min(1.0, (SIGN_SECONDS - ts) / 0.4)
         self._stamp(spr, 41, 40, {"#": _mix(OFF, col, fade)}, pop, pop)  # 右下（字幕・目・口にかからない）
 
+    def _draw_bulb(self):
+        tb = self.t - self.bulb_start
+        if not 0 <= tb < BULB_SECONDS:
+            return
+        pop = 1 + 0.45 * math.exp(-tb * 10)
+        fade = min(1.0, (BULB_SECONDS - tb) / 0.3)
+        cols = {"#": _mix(OFF, GOLD, fade), "w": _mix(OFF, (255, 255, 255), fade),
+                "s": _mix(OFF, (150, 150, 170), fade)}
+        self._stamp(SPR_BULB, 24, 6, cols, pop, pop)
+        if (tb * 8) % 2 < 1.3:  # ぴかっ（光の線がまたたく）
+            ray = {"#": _mix(OFF, GOLD, fade * 0.8)}
+            for sx in (-1, 1):
+                self._stamp(SPR_RAY_H, 24 + sx * 7, 5, ray)
+                self._stamp(SPR_RAY_V, 24 + sx * 5, 1, ray)
+            self._stamp(SPR_RAY_V, 24, 0, ray)
+
+    def _draw_bubbles(self, dx, dy):
+        """頭の上にぽわぽわ浮かんで消える泡（「うーん」のとき）。"""
+        h = self._hmm()
+        if h <= 0:
+            return
+        for i in range(3):
+            ph = (self.t * 0.45 + i / 3) % 1.0
+            x = 33 + i * 3 + math.sin(self.t * 2 + i) * 1.2 + dx
+            y = 8 - ph * 8
+            a = h * math.sin(ph * math.pi)
+            if a > 0.15:
+                spr = SPR_BUBBLE if ph > 0.35 else SPR_BUBBLE_SMALL
+                self._stamp(spr, x, y, {"#": _mix(OFF, self.c_hi, a)})
+
     def _draw_fx(self, dx, dy):
         self._draw_sign()
+        self._draw_bulb()
         t, te = self.t, self.t - self.entered
         fade_in = min(1.0, te / 0.3)
         for fx in self.params["fx"]:
@@ -629,11 +719,8 @@ class Face:
             elif fx == "exclaim":
                 if te < 1.2 and (te > 0.15):
                     self._stamp(SPR_EXCLAIM, 42, 7 - min(te * 20, 2), {"#": GOLD})
-            elif fx == "dots":   # 考え中の …
-                n = int(t * 2.5) % 4
-                for i in range(n):
-                    self._stamp(np.array([["#", "#"], ["#", "#"]]), 39 + i * 3,
-                                4 + dy, {"#": self.c_main})
+            elif fx == "bubbles":   # 考え中のぽわぽわ
+                self._draw_bubbles(dx, dy)
             elif fx == "orbit":   # 頭の上を回るお星さま
                 for i in range(3):
                     a = t * 3 + i * 2 * math.pi / 3

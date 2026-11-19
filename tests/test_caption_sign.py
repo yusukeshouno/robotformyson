@@ -102,3 +102,23 @@ def test_just_call_answers_without_thinking_and_opens_follow_up():
     conv = cv.Conversation(Brain(), is_attended=lambda: False, wake_words=("イモ",))
     assert conv.handle("芋") is not None and Brain.calls == 0
     assert conv.handle("きょうは なにする") is not None and Brain.calls == 1   # 呼ばれたあとは顔がなくても聞く
+
+
+def test_thinking_stages_and_bulb():
+    import pygame
+    from robot.face import Face, THINK_HMM
+    pygame.init()
+    f = Face(96)
+    f.set_emotion("think")
+    f.update(0.5)
+    assert f._think_stage() == "recall" and f._hmm() == 0
+    for _ in range(int((THINK_HMM + 1) / 0.05)):
+        f.update(0.05)
+    assert f._think_stage() == "hmm" and f._hmm() == 1.0 and f._squint(1) < 1
+    f.render()                       # うーん・泡を描いても落ちない
+    f.set_emotion("joy")             # 答えが出た → 電球
+    assert f.bulb_start == f.t
+    f.render()
+    g = Face(96)
+    g.set_emotion("think"); g.update(1.0); g.set_emotion("neutral")   # 返事しなかった → 電球なし
+    assert g.bulb_start < 0
