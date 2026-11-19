@@ -753,7 +753,8 @@ class Conversation:
                 or time.monotonic() - self.last_reply < self.FOLLOW_UP
                 or (self.is_attended and self.is_attended()))
         if self._thinking:
-            self.events.put(("think", 4))
+            # 「聞いて考えはじめた」顔。まだ返事するか分からないので、前の返事の字幕は消さない
+            self.events.put(("listen", 4))
 
     def _on_unclear(self, rough=""):
         """声はしたけれど聞き取れなかった。待っている相手に分かるようにする。
