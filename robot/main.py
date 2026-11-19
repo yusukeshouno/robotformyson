@@ -58,7 +58,7 @@ def parse_args(argv=None):
     ap.add_argument("--size", default="720",
                     help="ウィンドウの大きさ(px)。一辺だけ（720）か 幅x高さ（480x800）")
     ap.add_argument("--fullscreen", action="store_true")
-    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--fps", type=int, default=20)  # Pi 4 では 30 だと耳（音の処理）の時間がなくなる
     ap.add_argument("--mouse", action="store_true", help="マウスを顔として扱う（カメラ不要）")
     ap.add_argument("--no-camera", action="store_true")
     ap.add_argument("--camera", choices=["auto", "picamera", "opencv"], default="auto")

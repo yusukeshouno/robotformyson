@@ -650,11 +650,15 @@ class Ears:
         """Silero VAD で区切る。Vosk は横で聞いて、当て推量の文字（rough）を作るだけ。"""
         was_speaking = self.segmenter.speaking
         audio = self.segmenter.feed(pcm_bytes)
-        if self.rec.AcceptWaveform(pcm_bytes):
-            self._rough.append(json.loads(self.rec.Result()).get("text", ""))
+        # Vosk は重いので、だれかが話している間だけ動かす（Pi 4 の CPU が足りず、音の処理がおくれていた）
+        if self.segmenter.speaking or audio is not None:
+            chunks = list(self.segmenter.buf) if not was_speaking else [pcm_bytes]  # 話しはじめは前の音から
+            for c in chunks:
+                if self.rec.AcceptWaveform(c):
+                    self._rough.append(json.loads(self.rec.Result()).get("text", ""))
         if audio is None:
             if not was_speaking and not self.segmenter.speaking:
-                self._rough = []              # だれも話していない間の Vosk の聞きまちがいは捨てる
+                self._rough = []
             return None
         self._rough.append(json.loads(self.rec.FinalResult()).get("text", ""))
         rough, self._rough = "".join(self._rough).replace(" ", ""), []
