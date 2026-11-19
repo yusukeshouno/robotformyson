@@ -700,20 +700,55 @@ class Ears:
         """（互換用）今の状態で音を1つ渡す。"""
         return self.process((self.gate.epoch, pcm_bytes))
 
+    STALL = 10.0        # マイクの音がこの秒数こなければ、録音を開きなおす
+    BACKLOG = 30        # 処理が追いつかず、たまった音がこれ以上なら古い音を捨てる（3秒ぶん）
+    HEARTBEAT = 600.0   # この秒数ごとに「耳は動いている」とログに出す
+
     def listen(self):
-        """発話ごとに文字を返すジェネレーター。"""
+        """発話ごとに文字を返すジェネレーター。
+
+        実機で、数時間たつと何も聞かなくなることがあった（原因は調査中）。そこで
+        - マイクの音が STALL 秒こなければ、録音を開きなおす
+        - 処理がおくれて音がたまったら、古い音を捨てて今の音から聞く
+        - ときどき、耳が動いていることと、たまっている音の数をログに出す
+        """
         import sounddevice as sd
 
         def callback(indata, frames, t, status):
             self.on_audio(bytes(indata))
 
-        with sd.RawInputStream(samplerate=self.rate, blocksize=int(self.rate * 0.1),
-                               device=self.device, dtype="int16", channels=1,
-                               callback=callback):
-            while True:
-                text = self.process(self.q.get())
-                if text:
-                    yield text
+        last_beat = time.monotonic()
+        while True:
+            try:
+                with sd.RawInputStream(samplerate=self.rate, blocksize=int(self.rate * 0.1),
+                                       device=self.device, dtype="int16", channels=1,
+                                       callback=callback):
+                    while True:
+                        try:
+                            item = self.q.get(timeout=self.STALL)
+                        except queue.Empty:
+                            if self.gate.is_open():
+                                print(f"[耳] {self.STALL:.0f}秒 マイクの音がこないので、開きなおします")
+                                break
+                            continue          # 話している間（ゲートが閉じている）は音がこなくてよい
+                        backlog = self.q.qsize()
+                        if backlog > self.BACKLOG:
+                            print(f"[耳] 処理がおくれています（{backlog} 個たまった）。古い音を捨てます")
+                            while self.q.qsize() > 2:
+                                try:
+                                    self.q.get_nowait()
+                                except queue.Empty:
+                                    break
+                        now = time.monotonic()
+                        if now - last_beat > self.HEARTBEAT:
+                            last_beat = now
+                            print(f"[耳] 聞いています（たまった音 {backlog}）")
+                        text = self.process(item)
+                        if text:
+                            yield text
+            except Exception as e:  # 録音が止まった・デバイスが抜けた
+                print(f"[耳] 録音のエラー: {e}。2秒後に開きなおします")
+                time.sleep(2)
 
 
 # ---------------------------------------------------------------- まとめ役

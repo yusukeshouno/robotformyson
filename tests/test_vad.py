@@ -87,3 +87,31 @@ def test_real_silero_model_is_quiet_on_noise():
 
 def test_create_without_model_returns_none(tmp_path):
     assert vad.Segmenter.create(16000, path=str(tmp_path / "none.onnx")) is None
+
+
+def test_listen_reopens_stream_when_audio_stops(monkeypatch):
+    """実機: 数時間後に何も聞かなくなった。音がこなければ録音を開きなおす。"""
+    import sys
+    import types
+
+    opened = []
+
+    class Stream:
+        def __init__(self, callback=None, **kw):
+            self.cb = callback
+            opened.append(self)
+
+        def __enter__(self):
+            if len(opened) >= 2:            # 2回目に開いたときだけ音がくる
+                self.cb(b"\x00\x00" * 1600, 1600, None, None)
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(RawInputStream=Stream))
+    ears = cv.Ears(rate=16000, gate=MicGate(tail=0), recognizer=FakeRec(), transcriber=None)
+    ears.STALL = 0.05
+    ears.process = lambda item: "きこえた"
+    assert next(ears.listen()) == "きこえた"
+    assert len(opened) == 2
