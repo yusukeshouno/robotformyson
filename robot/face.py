@@ -176,6 +176,8 @@ SPR_BULB = _sprite(        # 電球（ひらめいた！）
 )
 SPR_RAY_H = _sprite("##")
 SPR_RAY_V = _sprite("#", "#")
+SPR_NOTE = _sprite("..##", "..#.", "..#.", "###.", "###.")   # ♪
+SPR_SWEAT = _sprite(".#.", "##.", "###", "###", ".#.")     # 汗（あせあせ）
 SPR_VEIN = _sprite(".#..#.", "##..##", "......", "##..##", ".#..#.")
 SPR_MARU = _sprite(        # 〇（はい）
     "...#####...",
@@ -256,12 +258,35 @@ class Face:
         self.swap_start = -1.0        # 目の形を入れかえるまばたきの開始時刻
         self.sign_kind, self.sign_start = None, -10.0  # はい・いいえ（うなずく / 首をふる、〇×）
         self.bulb_start = -10.0       # 考えおわって答えが出た時刻（電球ぴかっ）
+        self.custom = None            # AI が部品で組み立てた顔 (土台の感情, パラメータ)
+        self.custom_until = None
         self.lo = pygame.Surface((N, N))
         self.grid = None
         self._ys, self._xs = np.mgrid[0:N, 0:N] + 0.5
 
+    def set_custom(self, base, params):
+        """AI が組み立てた顔。感情が base のあいだ、決まった顔の代わりにこれを出す。"""
+        self.custom = (base, params) if params else None
+        self.custom_until = None
+
+    def end_custom(self, after=0.0):
+        """組み立てた顔を after 秒後にやめる（話し終わったとき）。"""
+        if self.custom:
+            self.custom_until = self.t + after
+
+    def _target_for(self, name):
+        if self.custom and self.custom_until is not None and self.t >= self.custom_until:
+            self.custom = None
+        if self.custom and self.custom[0] == name:
+            t = _target(name)
+            t.update(self.custom[1])
+            return t
+        return _target(name)
+
     def set_emotion(self, name):
         if name in EMOTIONS and name != self.emotion:
+            if self.custom and self.emotion == self.custom[0]:
+                self.custom = None            # 組み立てた顔は、その返事のあいだだけ
             if (self.emotion == "think" and name not in ("neutral", "sleepy")
                     and self.t - self.entered > 0.6):
                 self.bulb_start = self.t      # 考えていて、答えが出た
@@ -313,7 +338,7 @@ class Face:
     def update(self, dt):
         self.t += dt
         k = 1 - math.exp(-dt * 8)
-        target = _target(self.emotion)
+        target = self._target_for(self.emotion)
         if self.emotion == "neutral" and self.mood != "neutral" and self.mood_w > 0:
             m = _target(self.mood)  # 目の形や動きは neutral のまま、数値だけ寄せる
             for key in _NUM_KEYS:
@@ -721,6 +746,16 @@ class Face:
                     self._stamp(SPR_EXCLAIM, 42, 7 - min(te * 20, 2), {"#": GOLD})
             elif fx == "bubbles":   # 考え中のぽわぽわ
                 self._draw_bubbles(dx, dy)
+            elif fx == "note":   # ♪ がふわふわ上がる（うたう・たのしい）
+                for i in range(2):
+                    ph = (t * 0.5 + i / 2) % 1.0
+                    self._stamp(SPR_NOTE, (40, 8)[i] + math.sin(ph * 6 + i) * 1.5 + dx,
+                                16 - ph * 12,
+                                {"#": _mix(OFF, GOLD, math.sin(ph * math.pi) * fade_in)})
+            elif fx == "sweat":  # こめかみに汗がひとつぶ、たらり
+                ph = (te * 0.6) % 1.0
+                self._stamp(SPR_SWEAT, 38 + dx, 10 + dy + ph * 3,
+                            {"#": _mix(OFF, TEAR, min(1.0, (1 - ph) * 2) * fade_in)})
             elif fx == "orbit":   # 頭の上を回るお星さま
                 for i in range(3):
                     a = t * 3 + i * 2 * math.pi / 3

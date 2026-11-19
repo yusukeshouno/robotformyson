@@ -154,6 +154,7 @@ def test_brain_gets_hint():
     from robot import conversation as cv
     brain = cv.ClaudeBrain.__new__(cv.ClaudeBrain)
     cv._BrainBase.__init__(brain, "ピコ", 10)
+    brain.face_parts = False
     assert brain.system_prompt() == brain.system
     brain.extra_system = lambda: "- テスト"
     assert brain.system_prompt().endswith("\n- テスト")

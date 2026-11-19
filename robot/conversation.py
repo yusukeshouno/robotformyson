@@ -27,6 +27,7 @@ import wave
 
 import numpy as np
 
+from . import expression
 from .arms import gesture_for
 from .audio import (AudioSettings, MicGate, add_audio_args, output_channels, resolve_device,
                     to_channels)
@@ -186,6 +187,8 @@ class _BrainBase:
         self.max_turns = max_turns
         self.history = []
         self.fallback = None  # つながらないときに代わりに答える頭脳（SimpleBrain）
+        self.face_parts = True  # 返事のたびに、顔の部品の組み合わせも考えてもらう
+        self.last_face = None   # 直前の返事で AI が選んだ顔の部品（expression.parse の辞書）
 
     def reply(self, text, image_jpeg=None):
         """(感情, 返事) を返す。通信エラーでも例外にせず、謝る返事を返す。"""
@@ -193,25 +196,31 @@ class _BrainBase:
             if wants_look(text):
                 text += "（いまは カメラが つかえないので、見えていません）"
             image_jpeg = None
+        self.last_face = None
         try:
             emotion, answer = self._ask(text, image_jpeg)
         except BrainError as e:
             if e.offline and self.fallback:
                 return self.fallback.reply(text)
             return e.emotion, e.answer
+        spec, answer = expression.parse(answer)
+        self.last_face = spec if self.face_parts else None
         answer = shorten(clean_for_speech(answer))
         if not answer:
             emotion, answer = "surprise", "えっと、もういっかい いって？"
         # 履歴は文字だけ残す（画像は毎回送り直さない）
         note = "（カメラの画像つき）" if image_jpeg else ""
         self.history += [{"role": "user", "content": text + note},
-                         {"role": "assistant", "content": f"[{emotion}] {answer}"}]
+                         {"role": "assistant", "content": f"[{emotion}] "
+                          + (expression.to_text(self.last_face) + " " if self.last_face else "")
+                          + answer}]
         self.history = self.history[-2 * self.max_turns:]
         return emotion, answer
 
     def system_prompt(self):
         extra = self.extra_system() if self.extra_system else ""
-        return self.system + ("\n" + extra if extra else "")
+        base = self.system + ("\n" + expression.PROMPT_HINT if self.face_parts else "")
+        return base + ("\n" + extra if extra else "")
 
     def _ask(self, text, image_jpeg):
         raise NotImplementedError
@@ -774,6 +783,7 @@ class Conversation:
         if faces is not None:
             from .faces import EnrollDialog
             self.enroll = EnrollDialog(faces, show=lambda t: self.events.put(("caption", t)))
+        self.artist = None                # drawing.Artist（お絵かき）/ None
         self.events = queue.Queue()
         self.last_reply = 0.0
         self._speak_lock = threading.Lock()
@@ -861,6 +871,8 @@ class Conversation:
             self.memory.drop_session()
             self._answer("neutral", "わかった。いまの おはなしは わすれるね。")
             return None
+        if self.artist and self._maybe_draw(text):
+            return None
         self.events.put(("think", 60))
         image = None
         if self.get_image and wants_look(text) and self.brain.vision:
@@ -871,14 +883,49 @@ class Conversation:
             self.memory.add_turn(text, answer)
         if self.language:
             self.language.on_turn(text, answer)
+        params = expression.compose(getattr(self.brain, "last_face", None))
+        if params:  # AI が組み立てた、その場の顔
+            print(f"[顔の部品] {expression.to_text(self.brain.last_face)}")
+            self.events.put(("compose", (emotion, params)))
         self.events.put((emotion, 60))
         sign = yes_no(answer)
         if sign:  # はい・いいえは顔でもはっきり見せる（うなずく・首をふる、〇・×）
             self.events.put(("sign", sign))
         self._speak(answer)
+        if params:
+            self.events.put(("uncompose", 1.5))
         self.events.put((emotion, 1.5))
         self.last_reply = time.monotonic()
         return emotion, answer
+
+    def _family_names(self):
+        if not self.faces:
+            return ()
+        people = getattr(getattr(self.faces, "db", None), "people", {}) or {}
+        return tuple(n for p in people.values() for n in (p.get("name"), p.get("call")) if n)
+
+    def _maybe_draw(self, text):
+        """「えを かいて」「ぼくの かお かいて」と頼まれたら、お絵かきを始める。"""
+        from .drawing import wants_drawing
+        req = wants_drawing(text, self._family_names())
+        if not req:
+            return False
+        kind, subject = req
+        image = call = None
+        if kind == "portrait":
+            image = self.get_image() if self.get_image else None
+            if not image:
+                self._answer("confused", "かおが みえないよ。カメラの まえに きてね。")
+                return True
+            call = self.who()
+        else:
+            subject = (f"子どもの たのみ「{subject}」（なにを描いてほしいか読みとって描く。"
+                       "とくになければ、すきなものを描く）")
+        if self.artist.request(kind, subject=subject, image=image, call=call, asked=True):
+            self._answer("excited", "いいよ！ どんなふうに かこうかな。ちょっと まってね。")
+        else:
+            self._answer("joy", "いま べつの えを かいてるところ。まっててね。")
+        return True
 
     def _speak(self, text):
         self.events.put(("caption", text))  # 字幕（スピーカーがなくても読める）

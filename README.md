@@ -408,6 +408,26 @@ python3 -m robot.arms down    # 手をおろした位置で止める（ホーン
 python3 -m robot.arms test    # 左手 → 右手 → バンザイ → バイバイ
 ```
 
+## AI が組み立てる顔
+
+返事のたびに、Mac の Ollama が「目・口・眉・ほっぺ・色・動き・小物」の組み合わせを選び、
+決まった表情ではなく、その場の話に合った顔を作ります（`robot/expression.py`）。
+返事のはじめに `{目:star 口:laugh 色:orange 小物:note}` のように書いてもらい、知らない部品は無視します。
+話し終わると、ふつうの表情にもどります。止めるときは `--no-face-parts`。
+
+## お絵かき
+
+ときどき（30分くらいごと、人がいて、しばらく話していないとき）、イモがドット絵を描いて見せます。
+「ねこ かいて」「ぼくの かお かいて」と頼むこともできます（`robot/drawing.py`）。
+
+- 絵の中身は Mac の Ollama が図形のリスト（JSON）で考え、Pi は 40×40 ドットに塗るだけです。
+- 家族の顔: 顔をおぼえた人が見えているときは、ときどき似顔絵にします。カメラの画像を Mac の Ollama に見せて
+  髪・めがね などの特徴だけを聞き、決まった描き方で描きます。写真は保存しません。
+- 描いた絵は `~/.local/share/robot/drawings/` に PNG と JSON で残ります。
+- 描いている途中で話しかけると、絵をしまって顔にもどります。
+- `--draw-every 15` で間隔（分）、`--draw-every 0` で頼まれたときだけ、`--no-drawing` で使わない。
+- 試す: `python3 -m robot.drawing --demo`（Ollama なし）/ `python3 -m robot.drawing --ollama-url http://Mac-mini.local:11434 --subject ねこ`
+
 ## 外部プログラムとの連携口
 
 ポート 5005（localhost）に `感情名 秒数` を UDP で送ると、その表情を出します。

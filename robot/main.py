@@ -104,6 +104,12 @@ def parse_args(argv=None):
                     help="話し方に合わせて言葉を変えない（話した長さも数えない）")
     ap.add_argument("--no-memory", action="store_true",
                     help="前に話したことをおぼえない（小さい子には無い方が楽しいこともある）")
+    ap.add_argument("--no-drawing", action="store_true",
+                    help="お絵かき（ときどきドット絵を描いて見せる）をしない")
+    ap.add_argument("--draw-every", type=float, default=30.0,
+                    help="自分からお絵かきするおおよその間隔（分）。0 で頼まれたときだけ")
+    ap.add_argument("--no-face-parts", action="store_true",
+                    help="AI に顔の部品を選んでもらわない（決まった表情だけにする）")
     ap.add_argument("--no-caption", action="store_true",
                     help="画面の上に字幕（イモの返事）を出さない")
     ap.add_argument("--debug", action="store_true")
@@ -149,6 +155,8 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
         if memory:  # 前に話したこと。まとめは家の中の Ollama だけ（Claude には送らない）
             hints.append(memory.prompt_hint)
             memory.summarize = getattr(brain, "summarize", None)
+        if hasattr(brain, "face_parts"):
+            brain.face_parts = not args.no_face_parts
         if hasattr(brain, "extra_system"):
             brain.extra_system = lambda: "\n".join(h for h in (f() for f in hints) if h)
         audio = cv.AudioSettings.load(args.mic, args.speaker, args.echo_tail)
@@ -174,6 +182,31 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
                            faces=faces, memory=memory, language=language).start()
     print("会話機能: 起動しました")
     return conv
+
+
+ALBUM = os.path.join(os.path.expanduser("~"), ".local", "share", "robot", "drawings")
+
+
+def start_drawing(args, conv):
+    """お絵かき。絵を考えるのは Mac の Ollama（Pi では重すぎるので）。"""
+    if args.no_drawing or args.brain != "ollama":
+        return None
+    from .conversation import OLLAMA_MODEL
+    from .drawing import Artist
+    artist = Artist(args.ollama_url, args.model or OLLAMA_MODEL)
+    if conv:
+        conv.artist = artist  # 「えを かいて」と頼まれたとき
+    every = f"{args.draw_every:.0f}分くらいごと" if args.draw_every > 0 else "頼まれたときだけ"
+    print(f"お絵かき: {every}（絵は {ALBUM} に保存）")
+    return artist
+
+
+def last_topic(conv):
+    """さいきん子どもが話したこと（自分から描く絵のヒント）。"""
+    for m in reversed(getattr(conv.brain, "history", [])):
+        if m.get("role") == "user":
+            return str(m.get("content", "")).split("（")[0][:40]
+    return None
 
 
 def start_arms(args):
@@ -269,6 +302,17 @@ def main(argv=None):
     pending_caption = None
     if args.talk:
         conv = start_conversation(args, tracker, last_face, growth, faces, memory, language)
+    artist, doodler, show, shown_title = start_drawing(args, conv), None, None, False
+    if artist:
+        from .drawing import Doodler, DrawingShow
+        doodler = Doodler(artist, args.draw_every)
+    last_heard = time.monotonic()
+
+    def say(text):
+        if conv:
+            conv.say(text)
+        else:
+            print(f"[ひとりごと] {text}")
 
     def react(reactions):  # 成長からの反応を顔と声に出す
         for i, (emo, dur, text) in enumerate(reactions):
@@ -358,6 +402,12 @@ def main(argv=None):
                     if arms:
                         arms.do(dur)
                     continue
+                if emo == "compose":  # AI が部品で組み立てた顔（返事のあいだ）
+                    face.set_custom(*dur)
+                    continue
+                if emo == "uncompose":
+                    face.end_custom(dur)
+                    continue
                 if emo == "sign":  # はい・いいえ
                     face.sign(dur)
                     if arms and dur == "yes":
@@ -372,6 +422,9 @@ def main(argv=None):
                 elif emo == "think" and caption:
                     caption.clear()  # 返事を考えはじめた: 前の返事の字幕で、考えている顔（上の …）が隠れないように
                 if emo == "heard":
+                    last_heard = now
+                    if show:  # 話しかけられたら、絵をしまって顔にもどる
+                        show.stop()
                     if engine.notice(now) and arms:
                         arms.perk()  # 眠っていたら、はっと手をあげる
                     if growth:
@@ -389,6 +442,27 @@ def main(argv=None):
                     caption.hold(now)  # 話している間と、顔の登録で答えを待っている間は消さない
                 caption.update(now)
 
+        if artist:  # お絵かき
+            got = artist.poll()
+            if got:
+                drawing, asked = got
+                if drawing is None:
+                    engine.express("sad", 2.0, now)
+                    say("ごめんね、うまく かけなかった。")
+                elif show is None:
+                    show, shown_title = DrawingShow(drawing, dots.rows, dots.top), False
+                    say("えを かくね。みてて！" if asked else "ねえねえ、えを かくから みてて！")
+                    try:
+                        drawing.save(ALBUM)
+                    except OSError as e:
+                        print(f"[お絵かき] 保存できませんでした（{e}）")
+            elif doodler and show is None and not (conv and conv._thinking):
+                recent = conv and now - conv.last_reply < 600
+                doodler.tick(present, now - max(last_heard, conv.last_reply if conv else 0),
+                             engine.sleeping, who=conv.who() if conv else None,
+                             get_image=tracker.jpeg if tracker else None,
+                             topic=last_topic(conv) if recent else None)
+
         emotion = engine.update(now)
         face.set_emotion(emotion)
         face.set_mood(*engine.mood(now))
@@ -398,13 +472,26 @@ def main(argv=None):
         if arms:
             hands = arms.update(dt, emotion, talk, engine.sleeping, present)
             arm_link.send(*hands)
-        if garden:
+        if show:
+            dots.draw_image(canvas, show.update(dt))
+            if show.finished_drawing and not shown_title:
+                shown_title = True
+                engine.express("excited", 2.0, now)
+                say(f"{show.d.title} を かいたよ！")
+            if show.ended:
+                show = None
+                engine.express("joy", 2.5, now)
+        elif garden:
             dots.draw(canvas, face, garden.update(dt), garden.keep)
         else:
             dots.draw(canvas, face)
 
         if caption:
-            caption.draw(canvas)
+            if show:  # 絵にかからないよう、下に出す
+                img = caption.render()
+                caption.draw(canvas, ch - img.get_height() if img else None)
+            else:
+                caption.draw(canvas)
         if show_cam and tracker:
             img = tracker.preview()
             if img is not None:
