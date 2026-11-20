@@ -158,3 +158,16 @@ def test_falls_back_when_structured_output_is_unavailable():
     assert a.picture("いえ").ok
     assert a.picture("いえ").ok
     assert calls == [dr.SCHEMA, None, None]  # 2回目からは最初から format なし
+
+
+def test_extract_json_repairs_cut_off_answer():
+    cut = '{"title":"ねこ","background":"pink","shapes":[{"type":"circle","color":"orange","x":20,"y":20,"r":8},{"type":"dot","color":"black","x":1,"y":1},{"type":"ellipse","rx": 4, "'
+    d = dr.extract_json(cut)
+    assert d["title"] == "ねこ" and len(d["shapes"]) == 2
+
+
+def test_triangle_without_corners_is_skipped():
+    d = dr.Drawing({"title": "x", "background": "white", "shapes": [
+        {"type": "triangle", "color": "red", "x": 5, "y": 5},
+        {"type": "dot", "color": "red", "x": 1, "y": 1}]})
+    assert len(d.strokes) == 1

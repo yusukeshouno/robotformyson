@@ -176,6 +176,8 @@ def shape_mask(s):
         m = dist <= w / 2 + 0.2
         line_t = u
     elif t == "triangle":
+        if not all(k in s for k in ("x2", "y2", "x3", "y3")):   # 角が足りない三角は描かない
+            return None, None
         pts = [(x, y), (_num(s, "x2"), _num(s, "y2")), (_num(s, "x3"), _num(s, "y3"))]
 
         def side(a, b):
@@ -249,7 +251,19 @@ def extract_json(text):
     a, b = text.find("{"), text.rfind("}")
     if a < 0 or b <= a:
         raise ValueError("JSON が見つかりません")
-    return json.loads(text[a:b + 1])
+    try:
+        return json.loads(text[a:b + 1])
+    except ValueError:
+        pass
+    # 長すぎて途中で切れた: 最後まで書けている図形までで閉じる
+    body = text[a:]
+    for end in sorted((i for i, ch in enumerate(body) if ch == "}"), reverse=True)[:60]:
+        for tail in ("]}", "}"):
+            try:
+                return json.loads(body[:end + 1] + tail)
+            except ValueError:
+                continue
+    raise ValueError("JSON がこわれています")
 
 
 # ---------------------------------------------------------------- 似顔絵
@@ -342,9 +356,10 @@ class Artist:
                     raise
                 print(f"[お絵かき] Ollama が JSON の形の指定を使えないので、ことばで頼みます（{e.code}）")
                 self.use_format = False
-        hint = ("\n\n答えは次の JSON スキーマに合う JSON だけを書いてください。説明や ``` は書かないでください。\n"
+        hint = ("\n\n答えは次の JSON スキーマに合う JSON だけを、空白や改行をつめて書いてください。"
+                "説明や ``` は書かないでください。図形は多くても 20 個まで。三角は x,y,x2,y2,x3,y3 を全部書きます。\n"
                 + json.dumps(schema, ensure_ascii=False))
-        return extract_json(self._post(prompt + hint, image, temperature, num_predict, None))
+        return extract_json(self._post(prompt + hint, image, temperature, num_predict * 2, None))
 
     def _post(self, prompt, image, temperature, num_predict, schema):
         msg = {"role": "user", "content": prompt}
