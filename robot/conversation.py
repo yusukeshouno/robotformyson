@@ -762,6 +762,10 @@ class Ears:
                                     self.q.get_nowait()
                                 except queue.Empty:
                                     break
+                            if self.segmenter:  # 途中で音が抜けたので、区切りはやりなおす
+                                self.segmenter.reset()
+                                self.rec.Reset()
+                                self._rough = []
                         now = time.monotonic()
                         if now - last_beat > self.HEARTBEAT:
                             last_beat = now
@@ -851,9 +855,20 @@ class Conversation:
         return self
 
     def _run(self):
+        # 耳と返事を別のスレッドにする。前は返事（Ollama で数秒〜十数秒）を待つあいだ耳が止まり、
+        # マイクの音がたまって「処理がおくれています」で捨てられていた（考えているあいだの言葉が消えた）。
+        heard = queue.Queue()
+        threading.Thread(target=self._reply_loop, args=(heard,), daemon=True).start()
+        if getattr(self.ears, "on_unclear", None):  # 「聞きとれず」も返事と同じスレッドで（順番がまざらないように）
+            self.ears.on_unclear = lambda rough="": heard.put((self._on_unclear, rough))
         for text in self.ears.listen():
+            heard.put((self.handle, text))
+
+    def _reply_loop(self, heard):
+        while True:
+            fn, text = heard.get()
             try:
-                self.handle(text)
+                fn(text)
             except Exception as e:  # 1回失敗しても聞き続ける
                 print(f"[会話] エラー: {e}")
 

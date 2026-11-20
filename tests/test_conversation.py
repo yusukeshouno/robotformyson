@@ -322,3 +322,27 @@ def test_speaker_name_kept_when_only_personality_in_system():
     assert "ゆうくん" in conv._with_speaker("こんにちは")
     brain.speaker_in_system = True
     assert conv._with_speaker("こんにちは") == "こんにちは"
+
+
+def test_ears_keep_running_while_replying():
+    """返事を考えているあいだも耳は止まらない（前は音がたまって捨てられていた）。"""
+    import threading
+    import time as _t
+    from robot.conversation import Conversation
+    gate = threading.Event()
+    listened = []
+
+    class Ears:
+        def listen(self):
+            for t in ("イモ ひとつめ", "イモ ふたつめ"):
+                listened.append(t)
+                yield t
+            gate.wait(2)
+
+    c = Conversation(brain=None, ears=Ears())
+    handled = []
+    c.handle = lambda t: (handled.append(t), _t.sleep(0.5))
+    c.start()
+    _t.sleep(0.2)
+    assert listened == ["イモ ひとつめ", "イモ ふたつめ"]  # 1つめの返事の途中でも2つめを聞けた
+    gate.set()

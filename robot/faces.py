@@ -430,7 +430,8 @@ _ENROLL_FACE = ("かお", "顔")
 _ENROLL_REMEMBER = ("おぼえ", "覚え", "とうろく", "登録")
 _YES = ("うん", "はい", "いいよ", "そう", "あってる", "あたり", "おっけー", "ok")
 _NO = ("ちがう", "違う", "いいえ", "ううん", "だめ", "ちゃう")
-_NAME_PREFIX = re.compile(r"^(えっと|えーと|あのね|ぼくの|わたしの|おれの|うちの)?"
+_NAME_PREFIX = re.compile(r"^(ちがうよ|ちがう|違う|ううん)?(ひらがなで|カタカナで|かたかなで)?"
+                          r"(えっと|えーと|あのね|ぼくの|わたしの|おれの|うちの)?"
                           r"(なまえは|名前は|ぼくは|わたしは|おれは|僕は|私は|俺は)?")
 _NAME_SUFFIX = re.compile(r"(っていうの|っていうよ|っていいます|といいます|です|だよ|だ|よ|ね|)$")
 
@@ -452,7 +453,7 @@ def is_no(text):
 
 def extract_name(text):
     """「ぼくは ゆうと だよ」→「ゆうと」。名前らしくなければ None。"""
-    t = unicodedata.normalize("NFKC", text).replace(" ", "").replace("　", "")
+    t = re.sub(r"[\s、。,.!?！？]", "", unicodedata.normalize("NFKC", text))
     t = _NAME_PREFIX.sub("", t)
     t = _NAME_SUFFIX.sub("", t)
     if not t or len(t) > 8 or not re.fullmatch(r"[ぁ-んァ-ヶー一-龯a-zA-Z]+", t):
@@ -460,6 +461,7 @@ def extract_name(text):
     return t
 
 
+_RENAME = re.compile(r"ちがう|違う|ううん|ひらがな|カタカナ|かたかな|なまえは|名前は")  # 名前を言いなおしている合図
 _CANCEL = ("やめる", "やめて", "やっぱりいい", "おしまい", "ストップ")
 
 
@@ -509,8 +511,15 @@ class EnrollDialog:
         elif self.state == "name":
             self._on_name(text, speak)
         elif self.state == "confirm":
-            if is_yes(text):
+            other = extract_name(text) if _RENAME.search(text) else None
+            if is_yes(text) or (self.name and _key(self.name) in _key(text)):  # 「あおだよ」も「うん」
                 self._capture(speak)
+            elif is_no(text) and other is None:
+                self._go("name")
+                speak("confused", "ごめんね。もういっかい おなまえ いって？")
+            elif other and not is_no(other):  # 「ちがう、あお」「ひらがなで あお」: 言いなおした名前で聞きなおす
+                self.name = other
+                speak("joy", f"{other}、で あってる？")
             elif is_no(text):
                 self._go("name")
                 speak("confused", "ごめんね。もういっかい おなまえ いって？")

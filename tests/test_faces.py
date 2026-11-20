@@ -515,3 +515,21 @@ def test_enroll_dialog_restarts_and_gives_up_when_unclear():
     assert d.active and said[-1].startswith("ん？")
     d.on_unclear(speak)                            # 3回聞き取れなければ、やめる
     assert not d.active and "また あとで" in said[-1]
+
+
+def test_confirm_accepts_name_and_rename():
+    out = []
+    d = fc.EnrollDialog(object())
+    d.state, d.name, d.last = "confirm", "青", d.clock()
+    d._capture = lambda speak: out.append("CAP")
+    speak = lambda e, t: out.append(t)
+    d.handle("ひらがなであお", speak)      # 言いなおし → 新しい名前で聞きなおす
+    assert d.name == "あお" and out[-1] == "あお、で あってる？"
+    d.handle("さらにして", speak)          # 関係ない言葉は名前にしない
+    assert d.name == "あお"
+    d.handle("あおだよ", speak)            # 名前をくりかえしたら「うん」と同じ
+    assert out[-1] == "CAP"
+
+
+def test_extract_name_ignores_punctuation():
+    assert fc.extract_name("ちがうよ、けんた") == "けんた"
