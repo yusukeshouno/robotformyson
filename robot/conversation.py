@@ -27,8 +27,11 @@ import wave
 
 import numpy as np
 
+from . import expression
+from .arms import gesture_for
 from .audio import (AudioSettings, MicGate, add_audio_args, output_channels, resolve_device,
                     to_channels)
+from .faces import is_no, is_yes
 from .memory import wants_forget
 
 DEFAULT_MODEL = "claude-opus-5-5"            # Claude を使うとき
@@ -47,6 +50,7 @@ SYSTEM_PROMPT = """あなたは「{name}」という名前の、机の上にい�
 - 火・刃物・薬・高いところ・知らない人について行くなど、危ないことは「おうちの人に聞いてね」と伝えてください。こわい話や大人向けの話はしません。
 - 住所や学校の名前などの個人情報は聞かないでください。言われても、くり返したり覚えたりしないでください。
 - 音声認識の聞きまちがいで、意味が通らない文が届くことがあります。そのときは「もういっかい言って？」と聞き返してください。
+- 「はい」か「いいえ」で答えられる質問には、返事の最初に「うん」か「ううん」をはっきり言ってください。
 - わからないことは、わからないと言ってください。"""
 
 # この言葉が入っていたら、カメラの画像をいっしょに送る
@@ -75,6 +79,23 @@ def normalize(text):
     """
     text = unicodedata.normalize("NFKC", text).lower()
     return "".join(chr(ord(ch) - 0x60) if "ァ" <= ch <= "ヶ" else ch for ch in text)
+
+
+# 名前の書き方のちがい（Whisper は「芋」と漢字で書くこともある）
+NAME_ALIASES = {"いも": ("芋",), "ぴこ": ()}
+
+
+def wake_variants(name):
+    """呼ばれたと分かる言葉: 名前（カタカナ・ひらがなは normalize でそろう）と、その漢字など。"""
+    return (name,) + NAME_ALIASES.get(normalize(name), ())
+
+
+def is_just_call(text, words):
+    """「イモ」「いもー」「ねえ、イモ」のように、名前を呼んだだけか。"""
+    t = re.sub(r"[\s、。,.!?！？ー〜~っ]", "", normalize(text))
+    for w in words:
+        t = t.replace(normalize(w), "")
+    return t in ("", "ねえ", "ねぇ", "おい", "あの", "あのね", "ちゃん", "くん", "さん")
 
 
 def contains_any(text, words):
@@ -124,6 +145,25 @@ def parse_reply(text):
     return emotion, _TAG_RE.sub("", text).strip()
 
 
+# はい・いいえ。返事の始まりだけを見る（「いいよ」は はい、「いいえ」は いいえ）
+YES_STARTS = ("はい", "うん", "そうだよ", "そうそう", "そうなの", "そう！", "そう!", "そうだね",
+              "いいよ", "いいね", "あたり", "せいかい", "正解", "もちろん", "ええ", "あってる", "できるよ")
+NO_STARTS = ("いいえ", "ううん", "うーうん", "ちがう", "違う", "いや", "だめ", "ダメ", "ざんねん",
+             "できないよ", "ないよ", "しらない", "知らない")
+
+
+def yes_no(answer):
+    """返事が「はい」か「いいえ」で始まっていれば 'yes' / 'no'。どちらでもなければ None。"""
+    t = normalize(answer).lstrip("、。,. 　")
+    for w in NO_STARTS:  # 「いいえ」を「いい」より先に見る
+        if t.startswith(normalize(w)):
+            return "no"
+    for w in YES_STARTS:
+        if t.startswith(normalize(w)):
+            return "yes"
+    return None
+
+
 def wants_look(text):
     return contains_any(text, LOOK_WORDS)
 
@@ -147,6 +187,8 @@ class _BrainBase:
         self.max_turns = max_turns
         self.history = []
         self.fallback = None  # つながらないときに代わりに答える頭脳（SimpleBrain）
+        self.face_parts = True  # 返事のたびに、顔の部品の組み合わせも考えてもらう
+        self.last_face = None   # 直前の返事で AI が選んだ顔の部品（expression.parse の辞書）
 
     def reply(self, text, image_jpeg=None):
         """(感情, 返事) を返す。通信エラーでも例外にせず、謝る返事を返す。"""
@@ -154,25 +196,31 @@ class _BrainBase:
             if wants_look(text):
                 text += "（いまは カメラが つかえないので、見えていません）"
             image_jpeg = None
+        self.last_face = None
         try:
             emotion, answer = self._ask(text, image_jpeg)
         except BrainError as e:
             if e.offline and self.fallback:
                 return self.fallback.reply(text)
             return e.emotion, e.answer
+        spec, answer = expression.parse(answer)
+        self.last_face = spec if self.face_parts else None
         answer = shorten(clean_for_speech(answer))
         if not answer:
             emotion, answer = "surprise", "えっと、もういっかい いって？"
         # 履歴は文字だけ残す（画像は毎回送り直さない）
         note = "（カメラの画像つき）" if image_jpeg else ""
         self.history += [{"role": "user", "content": text + note},
-                         {"role": "assistant", "content": f"[{emotion}] {answer}"}]
+                         {"role": "assistant", "content": f"[{emotion}] "
+                          + (expression.to_text(self.last_face) + " " if self.last_face else "")
+                          + answer}]
         self.history = self.history[-2 * self.max_turns:]
         return emotion, answer
 
     def system_prompt(self):
         extra = self.extra_system() if self.extra_system else ""
-        return self.system + ("\n" + extra if extra else "")
+        base = self.system + ("\n" + expression.PROMPT_HINT if self.face_parts else "")
+        return base + ("\n" + extra if extra else "")
 
     def _ask(self, text, image_jpeg):
         raise NotImplementedError
@@ -458,6 +506,54 @@ class Voice:
 
 
 # ---------------------------------------------------------------- 聞く
+class WhisperClient:
+    """Mac などで動かす Whisper の書き起こしサーバー（tools/whisper_server.py）に音を送る。
+
+    声ではなかったときは ""、つながらないときは None を返し、30秒は送らない
+    （そのあいだは Vosk の文字を使う）。
+    """
+
+    RETRY = 30.0
+
+    def __init__(self, url, timeout=10.0, clock=time.monotonic):
+        self.url = url.rstrip("/")
+        self.timeout = timeout
+        self.clock = clock
+        self.down_until = 0.0
+
+    def __call__(self, pcm_bytes, rate):
+        if not pcm_bytes or self.clock() < self.down_until:
+            return None
+        import io
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(pcm_bytes)
+        req = urllib.request.Request(self.url + "/transcribe", data=out.getvalue(),
+                                     headers={"Content-Type": "audio/wav"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                text = json.loads(r.read().decode("utf-8")).get("text", "")
+        except (OSError, ValueError) as e:
+            print(f"[書き起こし] つながらないので Vosk を使います（{e}）")
+            self.down_until = self.clock() + self.RETRY
+            return None
+        return text.replace(" ", "").replace("　", "").strip()  # "" = 声ではなかった
+
+
+def pick_rate(device=None, want=16000):
+    """録音のサンプリングレート。音声認識モデルは 16kHz 用なので、録れるなら 16kHz で録る
+    （44.1kHz を渡すと Vosk の中で変換が1回ふえ、聞き取りが少し悪くなる）。"""
+    import sounddevice as sd
+    try:
+        sd.check_input_settings(device=device, samplerate=want, channels=1, dtype="int16")
+        return want
+    except Exception:
+        return int(sd.query_devices(device, "input")["default_samplerate"])
+
+
 class Ears:
     """マイクの音を Vosk で文字にする。
 
@@ -465,23 +561,45 @@ class Ears:
     閉じる前に録りかけていた言葉の切れ端は捨てる（自分の声を拾わないため）。
     """
 
+    MAX_UTTERANCE = 15.0   # 書き起こしに送る音の長さの上限（秒）
+    PRE_ROLL = 1.0         # 話しはじめの前に残しておく音（秒）。言いはじめが切れないように
+    LOUD_HOLD = 2.0        # 雑音より大きい音のあと、この秒数は音を捨てない（Vosk が気づかない小さな声のため）
+    LOUD_RATIO = 3.0       # 部屋の雑音の何倍で「声かも」とみるか
+
     def __init__(self, model_path=DEFAULT_VOSK, device=None, rate=None, gate=None,
-                 recognizer=None):
+                 recognizer=None, transcriber=None, segmenter=None):
         self.device = device
+        # segmenter: 話しはじめ・終わりを見つける係（robot.vad.Segmenter、Silero VAD）。
+        # あれば Vosk より小さな声に強い。Vosk は Whisper が使えないときの文字の係になる。
+        self.segmenter = segmenter
+        self._rough = []
         self.gate = gate or MicGate()
+        # transcriber(pcm_bytes, rate) -> 文字 / ""（声ではない）/ None（使えない）。Mac の Whisper など。
+        # Vosk は「話しはじめ・話し終わり」を見つける係になり、文字は transcriber のものを使う。
+        self.transcriber = transcriber
+        self.buf = bytearray()
         if recognizer is None:
             from vosk import KaldiRecognizer, Model, SetLogLevel
             SetLogLevel(-1)
             if not os.path.isdir(model_path):
                 raise RuntimeError(f"音声認識モデルがありません: {model_path}（README 参照）")
             if rate is None:
-                import sounddevice as sd
-                rate = int(sd.query_devices(device, "input")["default_samplerate"])
+                rate = pick_rate(device)
             recognizer = KaldiRecognizer(Model(model_path), rate)
         self.rate = rate or 16000
         self.rec = recognizer
         self.q = queue.Queue()
         self._epoch = self.gate.epoch
+        # on_listen(vosk の文字): 話し終わったのが分かった瞬間（書き起こしを待つ前）に呼ぶ。考える顔を早く出すため
+        # on_unclear(): 声はしたのに書き起こしが「声ではない」と言ったときに呼ぶ
+        self.on_listen = None
+        self.on_unclear = None
+        self.on_speech = None  # on_speech(): 話しはじめたのが分かった瞬間（すぐ「聞いてるよ」の顔に）
+        self.lag = 0.0         # 録ってから処理するまでのおくれ（秒）。Pi が忙しいと大きくなる
+        self.timing = {}       # 直前の発話の時間（話し終わり・書き起こしにかかった秒）
+        self.floor = 0.0       # 部屋の雑音の大きさ（RMS、int16）
+        self._quiet_left = 0   # あと何バイト「静か」が続けば、前の音を捨ててよいか
+        self._loud_bytes = 0   # この発話で「声かも」だった音の長さ（バイト）
 
     def mute(self, on):
         """on=True で閉じる。False で開く（実際に聞きはじめるのは余韻の時間のあと）。"""
@@ -493,40 +611,171 @@ class Ears:
     def on_audio(self, pcm_bytes):
         """録音スレッドから呼ばれる。閉じている間の音は捨てる。"""
         if self.gate.is_open():
-            self.q.put((self.gate.epoch, pcm_bytes))
+            self.q.put((self.gate.epoch, pcm_bytes, time.monotonic()))
 
     def process(self, item):
         """録った音を1つ認識器に渡す。一区切りの発話が終わったら文字を返す。"""
-        epoch, pcm_bytes = item
+        epoch, pcm_bytes = item[0], item[1]
+        if len(item) > 2:
+            self.lag = time.monotonic() - item[2]   # 録ってから処理するまでのおくれ（秒）
         if epoch != self.gate.epoch or not self.gate.is_open():
             return None                       # 話す前に録った音・話している間の音
         if epoch != self._epoch:              # 話したあと最初の音: 途中経過を捨てる
             self.rec.Reset()
+            self.buf.clear()
+            self._rough = []
+            if self.segmenter:
+                self.segmenter.reset()
             self._epoch = epoch
-        if self.rec.AcceptWaveform(pcm_bytes):
-            text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
-            if text and self.gate.is_open() and self.gate.epoch == epoch:
-                return text
+        if self.segmenter:
+            return self._process_vad(epoch, pcm_bytes)
+        if self.transcriber:
+            self.buf += pcm_bytes
+            limit = int(self.rate * self.MAX_UTTERANCE) * 2
+            if len(self.buf) > limit:
+                del self.buf[:len(self.buf) - limit]
+            self._watch_level(pcm_bytes)
+        if not self.rec.AcceptWaveform(pcm_bytes):
+            if self.transcriber and not self._partial() and self._quiet_left <= 0:
+                # まだだれも話していない: 雑音を送らないよう、直前の少しだけ残す
+                keep = int(self.rate * self.PRE_ROLL) * 2
+                if len(self.buf) > keep:
+                    del self.buf[:len(self.buf) - keep]
+            return None
+        text = json.loads(self.rec.Result()).get("text", "").replace(" ", "")
+        audio, self.buf = bytes(self.buf), bytearray()
+        # Vosk が文字にできなくても、雑音よりはっきり大きい音が 0.3 秒以上あれば、小さな声かもしれない
+        rough = text  # Vosk の当て推量（「うん」のような短い返事は Whisper が空にしやすい）
+        maybe_voice = self._loud_bytes >= int(self.rate * 0.3) * 2
+        self._loud_bytes = 0
+        if text and self.on_listen:
+            self.on_listen(text)
+        if (text or maybe_voice) and self.transcriber:  # 声らしいときだけ送る（雑音は送らない）
+            better = self.transcriber(audio, self.rate)
+            if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
+                text = better
+                if not text and self.on_unclear:
+                    self.on_unclear(rough)
+        if text and self.gate.is_open() and self.gate.epoch == epoch:
+            return text
         return None
+
+    def _process_vad(self, epoch, pcm_bytes):
+        """Silero VAD で区切る。Vosk は横で聞いて、当て推量の文字（rough）を作るだけ。"""
+        was_speaking = self.segmenter.speaking
+        audio = self.segmenter.feed(pcm_bytes)
+        if self.segmenter.speaking and not was_speaking and self.on_speech:
+            self.on_speech()
+        # Vosk は重いので、だれかが話している間だけ動かす（Pi 4 の CPU が足りず、音の処理がおくれていた）
+        if self.segmenter.speaking or audio is not None:
+            chunks = list(self.segmenter.buf) if not was_speaking else [pcm_bytes]  # 話しはじめは前の音から
+            for c in chunks:
+                if self.rec.AcceptWaveform(c):
+                    self._rough.append(json.loads(self.rec.Result()).get("text", ""))
+        if audio is None:
+            if not was_speaking and not self.segmenter.speaking:
+                self._rough = []
+            return None
+        self._rough.append(json.loads(self.rec.FinalResult()).get("text", ""))
+        rough, self._rough = "".join(self._rough).replace(" ", ""), []
+        t_end = time.monotonic()
+        self.timing = {"end": t_end, "lag": self.lag, "stt": 0.0}
+        if self.on_listen:
+            self.on_listen(rough)
+        text = rough
+        if self.transcriber:
+            better = self.transcriber(audio, self.rate)
+            self.timing["stt"] = time.monotonic() - t_end
+            if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
+                text = better
+                if not text and self.on_unclear:
+                    self.on_unclear(rough)
+        if text and self.gate.is_open() and self.gate.epoch == epoch:
+            return text
+        return None
+
+    def _watch_level(self, pcm_bytes):
+        """音の大きさを見て、部屋の雑音の大きさを覚え、声らしい音のあとはしばらく音を捨てない。"""
+        x = np.frombuffer(pcm_bytes[:len(pcm_bytes) // 2 * 2], np.int16).astype(np.float32)
+        if not len(x):
+            return
+        rms = float(np.sqrt((x * x).mean()))
+        if self.floor <= 0:
+            self.floor = rms
+        elif rms < self.floor * 1.5:          # 静かなときだけ、ゆっくり雑音の大きさを合わせる
+            self.floor += (rms - self.floor) * 0.05
+        elif rms > self.floor * 6:            # 大きな音が続いても、少しずつ上がる
+            self.floor += (rms - self.floor) * 0.002
+        if rms > max(self.floor * self.LOUD_RATIO, 150):
+            self._loud_bytes += len(pcm_bytes)
+            self._quiet_left = int(self.rate * self.LOUD_HOLD) * 2
+        else:
+            self._quiet_left -= len(pcm_bytes)
+
+    def _partial(self):
+        """Vosk が今なにか聞き取りかけているか。"""
+        try:
+            return bool(json.loads(self.rec.PartialResult()).get("partial", "").strip())
+        except (AttributeError, ValueError):
+            return True
 
     def accept(self, pcm_bytes):
         """（互換用）今の状態で音を1つ渡す。"""
         return self.process((self.gate.epoch, pcm_bytes))
 
+    STALL = 10.0        # マイクの音がこの秒数こなければ、録音を開きなおす
+    BACKLOG = 30        # 処理が追いつかず、たまった音がこれ以上なら古い音を捨てる（3秒ぶん）
+    HEARTBEAT = 600.0   # この秒数ごとに「耳は動いている」とログに出す
+
     def listen(self):
-        """発話ごとに文字を返すジェネレーター。"""
+        """発話ごとに文字を返すジェネレーター。
+
+        実機で、数時間たつと何も聞かなくなることがあった（原因は調査中）。そこで
+        - マイクの音が STALL 秒こなければ、録音を開きなおす
+        - 処理がおくれて音がたまったら、古い音を捨てて今の音から聞く
+        - ときどき、耳が動いていることと、たまっている音の数をログに出す
+        """
         import sounddevice as sd
 
         def callback(indata, frames, t, status):
             self.on_audio(bytes(indata))
 
-        with sd.RawInputStream(samplerate=self.rate, blocksize=int(self.rate * 0.1),
-                               device=self.device, dtype="int16", channels=1,
-                               callback=callback):
-            while True:
-                text = self.process(self.q.get())
-                if text:
-                    yield text
+        last_beat = time.monotonic()
+        while True:
+            try:
+                with sd.RawInputStream(samplerate=self.rate, blocksize=int(self.rate * 0.1),
+                                       device=self.device, dtype="int16", channels=1,
+                                       callback=callback):
+                    while True:
+                        try:
+                            item = self.q.get(timeout=self.STALL)
+                        except queue.Empty:
+                            if self.gate.is_open():
+                                print(f"[耳] {self.STALL:.0f}秒 マイクの音がこないので、開きなおします")
+                                break
+                            continue          # 話している間（ゲートが閉じている）は音がこなくてよい
+                        backlog = self.q.qsize()
+                        if backlog > self.BACKLOG:
+                            print(f"[耳] 処理がおくれています（{backlog} 個たまった）。古い音を捨てます")
+                            while self.q.qsize() > 2:
+                                try:
+                                    self.q.get_nowait()
+                                except queue.Empty:
+                                    break
+                            if self.segmenter:  # 途中で音が抜けたので、区切りはやりなおす
+                                self.segmenter.reset()
+                                self.rec.Reset()
+                                self._rough = []
+                        now = time.monotonic()
+                        if now - last_beat > self.HEARTBEAT:
+                            last_beat = now
+                            print(f"[耳] 聞いています（たまった音 {backlog}）")
+                        text = self.process(item)
+                        if text:
+                            yield text
+            except Exception as e:  # 録音が止まった・デバイスが抜けた
+                print(f"[耳] 録音のエラー: {e}。2秒後に開きなおします")
+                time.sleep(2)
 
 
 # ---------------------------------------------------------------- まとめ役
@@ -542,34 +791,94 @@ class Conversation:
         self.language = language          # Language（話し方に合わせる。数字だけ数える）/ None
         self.get_image = get_image        # () -> JPEG bytes / None
         self.is_attended = is_attended    # () -> 人がこちらを見ているか
-        self.wake_words = tuple(wake_words)
+        self.wake_words = tuple(v for w in wake_words for v in wake_variants(w))
         self.faces = faces                # FaceRecognizer（顔をおぼえる機能）/ None
         self.enroll = None
         if faces is not None:
             from .faces import EnrollDialog
-            self.enroll = EnrollDialog(faces)
+            self.enroll = EnrollDialog(faces, show=lambda t: self.events.put(("caption", t)))
+        self.artist = None                # drawing.Artist（お絵かき）/ None
         self.events = queue.Queue()
         self.last_reply = 0.0
         self._speak_lock = threading.Lock()
+        self._thinking = False
+        if ears is not None:
+            ears.on_listen = self._on_listen
+            ears.on_unclear = self._on_unclear
+            ears.on_speech = self._on_speech
+
+    def _expecting(self):
+        """いま話しかけられていそうか（顔が見える・返事のすぐあと・顔の登録中）。"""
+        return bool((self.enroll and self.enroll.active)
+                    or time.monotonic() - self.last_reply < self.FOLLOW_UP
+                    or (self.is_attended and self.is_attended()))
+
+    def _on_speech(self):
+        """声がしはじめた瞬間。耳をすます顔（話しかけられていそうなときだけ）。"""
+        if self._expecting():
+            self.events.put(("hearing", 0))
+
+    def _on_listen(self, rough_text):
+        """話し終わった直後（文字になる前）。返事をしそうなら、すぐ考える顔にする。"""
+        if rough_text:
+            self._thinking = self.should_reply(rough_text)
+        else:  # Vosk は文字にできなかったが、声はした（Silero VAD）。待っている相手なら考える顔に
+            self._thinking = self._expecting()
+        if self._thinking:
+            # 「聞いて考えはじめた」顔。まだ返事するか分からないので、前の返事の字幕は消さない
+            self.events.put(("listen", 4))
+
+    def _on_unclear(self, rough=""):
+        """声はしたけれど聞き取れなかった。待っている相手に分かるようにする。
+
+        顔の登録で「あってる？」と聞いたあとは、Vosk が「うん」「ちがう」と聞いていればそれを使う。
+        """
+        thinking, self._thinking = self._thinking, False
+        if (rough and self.wake_words and contains_any(rough, self.wake_words)
+                and not (self.enroll and self.enroll.active)):
+            # 「イモ…」と呼ばれたのに、そのあとが聞き取れなかった: 呼ばれたことには答えて、もう一度聞く
+            self.events.put(("heard", 0))
+            self._answer("confused", "ん？ よんだ？ もういっかい いって？")
+        elif (self.enroll and self.enroll.active and self.enroll.state == "confirm" and rough
+                and (is_yes(rough) or is_no(rough))):
+            self.handle(rough)
+        elif self.enroll and self.enroll.active:  # 名前を待っている: 声と字幕で聞きなおす（何回かまで）
+            self.enroll.on_unclear(self._answer)
+        elif thinking:  # 聞き取れなかったことを、はっきり見せる（？の顔と字幕）
+            print("[聞きとれず] もういっかい たのむ")
+            self.events.put(("unclear", 0))
+            self.events.put(("confused", 2.0))
+            self.events.put(("caption", "ん？ もういっかい いって？"))
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
         return self
 
     def _run(self):
+        # 耳と返事を別のスレッドにする。前は返事（Ollama で数秒〜十数秒）を待つあいだ耳が止まり、
+        # マイクの音がたまって「処理がおくれています」で捨てられていた（考えているあいだの言葉が消えた）。
+        heard = queue.Queue()
+        threading.Thread(target=self._reply_loop, args=(heard,), daemon=True).start()
+        if getattr(self.ears, "on_unclear", None):  # 「聞きとれず」も返事と同じスレッドで（順番がまざらないように）
+            self.ears.on_unclear = lambda rough="": heard.put((self._on_unclear, rough))
         for text in self.ears.listen():
+            heard.put((self.handle, text))
+
+    def _reply_loop(self, heard):
+        while True:
+            fn, text = heard.get()
             try:
-                self.handle(text)
+                fn(text)
             except Exception as e:  # 1回失敗しても聞き続ける
                 print(f"[会話] エラー: {e}")
 
     def should_reply(self, text):
         if self.enroll and self.enroll.active:  # 顔の登録の途中（「うん」も聞く）
             return True
+        if contains_any(text, self.wake_words):  # 「芋」1文字でも呼ばれたことになる
+            return True
         if len(text) < 2:
             return False
-        if contains_any(text, self.wake_words):
-            return True
         if time.monotonic() - self.last_reply < self.FOLLOW_UP:
             return True
         return self.is_attended is None or self.is_attended()
@@ -577,32 +886,98 @@ class Conversation:
     def handle(self, text):
         if not self.should_reply(text):
             print(f"[聞こえた（無視）] {text}")
+            if self._thinking:
+                self._thinking = False
+                self.events.put(("neutral", 0.5))
             return None
         print(f"[聞こえた] {text}")
+        self._thinking = False
+        self.events.put(("ack", 0))  # 聞きとれたよ（小さくうなずく）
+        if (self.wake_words and is_just_call(text, self.wake_words)
+                and not (self.enroll and self.enroll.active)):
+            # 名前を呼ばれただけ: 考えずにすぐ「なあに？」。そのあと少しのあいだは顔が見えなくても聞く
+            self.events.put(("heard", 0))
+            self._answer("excited", random.choice(("なあに？", "はーい！", "よんだ？")))
+            return "excited", "なあに？"
         self.events.put(("heard", 0))
+        gesture = gesture_for(text)
+        if gesture:
+            self.events.put(("gesture", gesture))
         if self.enroll and self.enroll.handle(text, self._answer):
             return None
         if self.memory and wants_forget(text):  # 「いまの わすれて」：この会話はおぼえない
             self.memory.drop_session()
             self._answer("neutral", "わかった。いまの おはなしは わすれるね。")
             return None
+        if self.artist and self._maybe_draw(text):
+            return None
         self.events.put(("think", 60))
         image = None
         if self.get_image and wants_look(text) and self.brain.vision:
             image = self.get_image()
+        t_ask = time.monotonic()
         emotion, answer = self.brain.reply(self._with_speaker(text), image)
         print(f"[{emotion}] {answer}")
+        self._log_timing(t_ask)
         if self.memory:
             self.memory.add_turn(text, answer)
         if self.language:
             self.language.on_turn(text, answer)
+        params = expression.compose(getattr(self.brain, "last_face", None))
+        if params:  # AI が組み立てた、その場の顔
+            print(f"[顔の部品] {expression.to_text(self.brain.last_face)}")
+            self.events.put(("compose", (emotion, params)))
         self.events.put((emotion, 60))
+        sign = yes_no(answer)
+        if sign:  # はい・いいえは顔でもはっきり見せる（うなずく・首をふる、〇・×）
+            self.events.put(("sign", sign))
         self._speak(answer)
+        if params:
+            self.events.put(("uncompose", 1.5))
         self.events.put((emotion, 1.5))
         self.last_reply = time.monotonic()
         return emotion, answer
 
+    def _family_names(self):
+        if not self.faces:
+            return ()
+        people = getattr(getattr(self.faces, "db", None), "people", {}) or {}
+        return tuple(n for p in people.values() for n in (p.get("name"), p.get("call")) if n)
+
+    def _maybe_draw(self, text):
+        """「えを かいて」「ぼくの かお かいて」と頼まれたら、お絵かきを始める。"""
+        from .drawing import wants_drawing
+        req = wants_drawing(text, self._family_names())
+        if not req:
+            return False
+        kind, subject = req
+        image = call = None
+        if kind == "portrait":
+            image = self.get_image() if self.get_image else None
+            if not image:
+                self._answer("confused", "かおが みえないよ。カメラの まえに きてね。")
+                return True
+            call = self.who()
+        else:
+            subject = (f"子どもの たのみ「{subject}」（なにを描いてほしいか読みとって描く。"
+                       "とくになければ、すきなものを描く）")
+        if self.artist.request(kind, subject=subject, image=image, call=call, asked=True):
+            self._answer("excited", "いいよ！ どんなふうに かこうかな。ちょっと まってね。")
+        else:
+            self._answer("joy", "いま べつの えを かいてるところ。まっててね。")
+        return True
+
+    def _log_timing(self, t_ask):
+        """どこで時間がかかっているかをログに出す（返事がおそいときの調べもの用）。"""
+        tm = getattr(self.ears, "timing", None) or {}
+        now = time.monotonic()
+        if not tm.get("end") or now - tm["end"] > 120:
+            return
+        print(f"[時間] おくれ {tm.get('lag', 0):.1f}秒 / 書き起こし {tm.get('stt', 0):.1f}秒"
+              f" / 考える {now - t_ask:.1f}秒 / 話し終わりから返事まで {now - tm['end']:.1f}秒")
+
     def _speak(self, text):
+        self.events.put(("caption", text))  # 字幕（スピーカーがなくても読める）
         if not self.voice:
             return
         with self._speak_lock:  # 返事と あいさつが重ならないように

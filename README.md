@@ -28,6 +28,7 @@ Raspberry Pi 4 ＋小型正方形ディスプレイ＋カメラで動く、エ�
 | 目 | USB Web カメラ（サンワサプライ 400-CAM103） | 手元にある（Camera Module 3 も使える） |
 | 耳 | SunFounder USB ミニマイク | 注文済み |
 | 口 | Pi の 3.5mm 出力 → PAM8403 アンプ基板（USB 5V 給電）→ 3W 4Ω スピーカー ×2 | 注文済み |
+| 手 | XIAO RP2040 ＋ SG90/MG90S サーボ ×2（サーボの 5V は XIAO から） | 用意する |
 | 電源・記憶 | Pi 4 用 5V 3A USB-C 電源、microSD 32GB 以上 | 用意する（手持ちがあれば不要） |
 
 - HyperPixel は GPIO ピンをすべて使いますが、カメラとマイクは USB、スピーカーは 3.5mm 端子なので、ピンは足りなくなりません。
@@ -365,6 +366,68 @@ python3 -m robot.memory reset         # ぜんぶ消す
 
 保存場所は `~/.local/share/robot/memory.json`（`ROBOT_MEMORY_FILE` で変更可）。
 
+## はい・いいえと字幕
+
+- 返事が「うん」「はい」で始まると、顔が2回うなずいて右下に緑の〇、「ううん」「いいえ」なら首を横にふって赤い×を出します（AI には、はい・いいえで答えられる質問には最初に「うん」か「ううん」を言うように伝えています）。
+- 画面の上に、イモの返事を字幕で出します。スピーカーがなくても何と言ったか読めます。
+- 字幕の文字は顔と同じドット絵の雰囲気のピクセルフォント（PixelMplus12、M+ FONT LICENSE、`robot/fonts/` に同梱）。出したくないときは `--no-caption`。
+
+## 聞き取りを正確にする（Mac mini の Whisper）
+
+Pi の Vosk（小さいモデル）は、子どもの声やくだけた話し方の聞き取りが苦手です。Mac mini で Whisper を動かすと、Pi は「話しはじめ・話し終わり」だけを見つけて、その間の音を Mac に送り、Mac が文字にします。音は家の中だけで、外には出ません。Mac につながらないときは、自動で Vosk に戻ります。
+
+```bash
+# Mac で（最初の1回）
+python3 -m venv ~/whisper-venv && ~/whisper-venv/bin/pip install mlx-whisper numpy
+~/whisper-venv/bin/python tools/whisper_server.py      # 初回はモデルのダウンロードで数分
+curl http://localhost:8765/health
+
+# Pi で: イモの起動に付ける
+python3 -m robot.main --fullscreen --talk --whisper-url http://Mac-mini.local:8765 ...
+```
+
+「話しはじめ・話し終わり」は、Silero VAD（人の声かどうかだけを見る 2MB の小さなモデル、MIT ライセンス、`robot/data/` に同梱）で見つけます。Vosk より小さな声に強く、名前や「うん」のような短い言葉も落としにくくなります。`pip install onnxruntime` が入っていれば自動で使い、なければ Vosk で区切ります（`--no-vad` で Vosk に戻せます）。
+
+## 手を動かす（左右の2本）
+
+箱の左右の壁に入れたサーボ2個で、手を動かします。XIAO RP2040 を USB でさせば自動でつながり、なければ手なしで動きます。部品・配線・書きこみは [firmware/arms_xiao/README.md](firmware/arms_xiao/README.md)。
+
+| どんなとき | 手の動き |
+|---|---|
+| うれしい / わくわく / びっくり | 両手をぱたぱた / バンザイしてゆらす / ぱっと両手をあげる |
+| かなしい・ねむい | だらんとおろす |
+| てれる / 考えちゅう / こまった | 両手で顔をかくす / 片手をあごに / 頭をかく |
+| 話している間 | 声に合わせて手を少しずつ動かす |
+| 「バイバイ」「こんにちは」・家族が来た | 右手をふる |
+| 「バンザイ」「やったー」 | バンザイ |
+| なでられた | もじもじ |
+| だれもいない | ほとんどおろしたまま（電池の節約）、ときどき片手を少し |
+
+```bash
+python3 -m robot.arms down    # 手をおろした位置で止める（ホーンを付けるとき）
+python3 -m robot.arms test    # 左手 → 右手 → バンザイ → バイバイ
+```
+
+## AI が組み立てる顔
+
+返事のたびに、Mac の Ollama が「目・口・眉・ほっぺ・色・動き・小物」の組み合わせを選び、
+決まった表情ではなく、その場の話に合った顔を作ります（`robot/expression.py`）。
+返事のはじめに `{目:star 口:laugh 色:orange 小物:note}` のように書いてもらい、知らない部品は無視します。
+話し終わると、ふつうの表情にもどります。止めるときは `--no-face-parts`。
+
+## お絵かき
+
+ときどき（30分くらいごと、人がいて、しばらく話していないとき）、イモがドット絵を描いて見せます。
+「ねこ かいて」「ぼくの かお かいて」と頼むこともできます（`robot/drawing.py`）。
+
+- 絵の中身は Mac の Ollama が図形のリスト（JSON）で考え、Pi は 40×40 ドットに塗るだけです。
+- 家族の顔: 顔をおぼえた人が見えているときは、ときどき似顔絵にします。カメラの画像を Mac の Ollama に見せて
+  髪・めがね などの特徴だけを聞き、決まった描き方で描きます。写真は保存しません。
+- 描いた絵は `~/.local/share/robot/drawings/` に PNG と JSON で残ります。
+- 描いている途中で話しかけると、絵をしまって顔にもどります。
+- `--draw-every 15` で間隔（分）、`--draw-every 0` で頼まれたときだけ、`--no-drawing` で使わない。
+- 試す: `python3 -m robot.drawing --demo`（Ollama なし）/ `python3 -m robot.drawing --ollama-url http://Mac-mini.local:11434 --subject ねこ`
+
 ## 外部プログラムとの連携口
 
 ポート 5005（localhost）に `感情名 秒数` を UDP で送ると、その表情を出します。
@@ -395,6 +458,7 @@ echo "joy 3" | nc -u -w0 127.0.0.1 5005
 | `robot/personality.py` | 好奇心いっぱいで まちがえても大丈夫を見せる性格 |
 | `robot/language.py` | 話し方に合わせて言葉のむずかしさを変える・今週のことば |
 | `robot/memory.py` | 前に話したことを人ごとにおぼえる（家の中だけに保存） |
+| `robot/arms.py` / `firmware/arms_xiao/` | 手の動き（表情・会話から角度を決める）と、サーボを動かす XIAO のプログラム |
 | `tests/` | 会話・音声・成長・顔をおぼえる・記憶のテスト |
 
 ## テスト
