@@ -133,3 +133,28 @@ def test_conversation_draw_request():
     got = wait(conv.artist)
     assert got and got[1] is True
     assert "ねこ かいて" in conv.artist.prompts[0][0]
+
+
+def test_extract_json():
+    assert dr.extract_json('```json\n{"a": 1}\n```') == {"a": 1}
+    assert dr.extract_json('はい！ {"a": {"b": 2}} どうぞ') == {"a": {"b": 2}}
+
+
+def test_falls_back_when_structured_output_is_unavailable():
+    import io
+    import urllib.error
+    a = dr.Artist()
+    calls = []
+
+    def post(prompt, image, temperature, num_predict, schema):
+        calls.append(schema)
+        if schema is not None:
+            raise urllib.error.HTTPError("u", 501, "structured output is unavailable", {},
+                                         io.BytesIO(b""))
+        assert "JSON スキーマ" in prompt
+        return "```json\n" + __import__("json").dumps(dr.EXAMPLE) + "\n```"
+
+    a._post = post
+    assert a.picture("いえ").ok
+    assert a.picture("いえ").ok
+    assert calls == [dr.SCHEMA, None, None]  # 2回目からは最初から format なし

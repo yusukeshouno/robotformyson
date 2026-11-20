@@ -21,6 +21,7 @@ import queue
 import random
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import numpy as np
@@ -238,6 +239,19 @@ class Drawing:
         return stem
 
 
+def extract_json(text):
+    """モデルの答えから JSON を取り出す（``` や前後の説明があってもよい）。"""
+    text = _THINK_RE.sub("", text or "")
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    a, b = text.find("{"), text.rfind("}")
+    if a < 0 or b <= a:
+        raise ValueError("JSON が見つかりません")
+    return json.loads(text[a:b + 1])
+
+
 # ---------------------------------------------------------------- 似顔絵
 def portrait_shapes(f, seed=None):
     """顔の特徴 → 似顔絵の図形。決まった描き方なので、いつも同じくらいかわいく描ける。"""
@@ -311,20 +325,41 @@ class Artist:
         self.url, self.model, self.timeout = url.rstrip("/"), model, timeout
         self.ready = queue.Queue()     # (Drawing, 頼まれたか) ができたら入る
         self.busy = False
+        self.use_format = True         # Ollama の structured outputs を使う（断られたら止める）
 
     def _chat(self, prompt, schema, image=None, temperature=0.8, num_predict=1500):
+        """JSON で答えてもらう。
+
+        ふつうは Ollama の structured outputs（format）で形を決める。Mac の MLX で動く
+        モデルなどは format を断る（501 structured output is unavailable）ので、そのときは
+        形をことばで伝えて、返ってきた文から { … } を取り出す。
+        """
+        if self.use_format:
+            try:
+                return extract_json(self._post(prompt, image, temperature, num_predict, schema))
+            except urllib.error.HTTPError as e:
+                if e.code not in (400, 500, 501):
+                    raise
+                print(f"[お絵かき] Ollama が JSON の形の指定を使えないので、ことばで頼みます（{e.code}）")
+                self.use_format = False
+        hint = ("\n\n答えは次の JSON スキーマに合う JSON だけを書いてください。説明や ``` は書かないでください。\n"
+                + json.dumps(schema, ensure_ascii=False))
+        return extract_json(self._post(prompt + hint, image, temperature, num_predict, None))
+
+    def _post(self, prompt, image, temperature, num_predict, schema):
         msg = {"role": "user", "content": prompt}
         if image:
             msg["images"] = [base64.standard_b64encode(image).decode()]
-        body = {"model": self.model, "messages": [msg], "stream": False, "format": schema,
+        body = {"model": self.model, "messages": [msg], "stream": False,
                 "think": False, "keep_alive": "30m",
                 "options": {"temperature": temperature, "num_predict": num_predict,
                             "num_ctx": 4096}}
+        if schema is not None:
+            body["format"] = schema
         req = urllib.request.Request(self.url + "/api/chat", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            text = json.loads(r.read().decode("utf-8")).get("message", {}).get("content", "")
-        return json.loads(_THINK_RE.sub("", text))
+            return json.loads(r.read().decode("utf-8")).get("message", {}).get("content", "")
 
     def picture(self, subject):
         prompt = DRAW_PROMPT.format(colors=" ".join(PALETTE), max=MAX_SHAPES,
