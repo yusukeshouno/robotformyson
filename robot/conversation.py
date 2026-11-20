@@ -594,6 +594,9 @@ class Ears:
         # on_unclear(): 声はしたのに書き起こしが「声ではない」と言ったときに呼ぶ
         self.on_listen = None
         self.on_unclear = None
+        self.on_speech = None  # on_speech(): 話しはじめたのが分かった瞬間（すぐ「聞いてるよ」の顔に）
+        self.lag = 0.0         # 録ってから処理するまでのおくれ（秒）。Pi が忙しいと大きくなる
+        self.timing = {}       # 直前の発話の時間（話し終わり・書き起こしにかかった秒）
         self.floor = 0.0       # 部屋の雑音の大きさ（RMS、int16）
         self._quiet_left = 0   # あと何バイト「静か」が続けば、前の音を捨ててよいか
         self._loud_bytes = 0   # この発話で「声かも」だった音の長さ（バイト）
@@ -608,11 +611,13 @@ class Ears:
     def on_audio(self, pcm_bytes):
         """録音スレッドから呼ばれる。閉じている間の音は捨てる。"""
         if self.gate.is_open():
-            self.q.put((self.gate.epoch, pcm_bytes))
+            self.q.put((self.gate.epoch, pcm_bytes, time.monotonic()))
 
     def process(self, item):
         """録った音を1つ認識器に渡す。一区切りの発話が終わったら文字を返す。"""
-        epoch, pcm_bytes = item
+        epoch, pcm_bytes = item[0], item[1]
+        if len(item) > 2:
+            self.lag = time.monotonic() - item[2]   # 録ってから処理するまでのおくれ（秒）
         if epoch != self.gate.epoch or not self.gate.is_open():
             return None                       # 話す前に録った音・話している間の音
         if epoch != self._epoch:              # 話したあと最初の音: 途中経過を捨てる
@@ -659,6 +664,8 @@ class Ears:
         """Silero VAD で区切る。Vosk は横で聞いて、当て推量の文字（rough）を作るだけ。"""
         was_speaking = self.segmenter.speaking
         audio = self.segmenter.feed(pcm_bytes)
+        if self.segmenter.speaking and not was_speaking and self.on_speech:
+            self.on_speech()
         # Vosk は重いので、だれかが話している間だけ動かす（Pi 4 の CPU が足りず、音の処理がおくれていた）
         if self.segmenter.speaking or audio is not None:
             chunks = list(self.segmenter.buf) if not was_speaking else [pcm_bytes]  # 話しはじめは前の音から
@@ -671,11 +678,14 @@ class Ears:
             return None
         self._rough.append(json.loads(self.rec.FinalResult()).get("text", ""))
         rough, self._rough = "".join(self._rough).replace(" ", ""), []
+        t_end = time.monotonic()
+        self.timing = {"end": t_end, "lag": self.lag, "stt": 0.0}
         if self.on_listen:
             self.on_listen(rough)
         text = rough
         if self.transcriber:
             better = self.transcriber(audio, self.rate)
+            self.timing["stt"] = time.monotonic() - t_end
             if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
                 text = better
                 if not text and self.on_unclear:
@@ -791,16 +801,25 @@ class Conversation:
         if ears is not None:
             ears.on_listen = self._on_listen
             ears.on_unclear = self._on_unclear
+            ears.on_speech = self._on_speech
+
+    def _expecting(self):
+        """いま話しかけられていそうか（顔が見える・返事のすぐあと・顔の登録中）。"""
+        return bool((self.enroll and self.enroll.active)
+                    or time.monotonic() - self.last_reply < self.FOLLOW_UP
+                    or (self.is_attended and self.is_attended()))
+
+    def _on_speech(self):
+        """声がしはじめた瞬間。耳をすます顔（話しかけられていそうなときだけ）。"""
+        if self._expecting():
+            self.events.put(("hearing", 0))
 
     def _on_listen(self, rough_text):
         """話し終わった直後（文字になる前）。返事をしそうなら、すぐ考える顔にする。"""
         if rough_text:
             self._thinking = self.should_reply(rough_text)
         else:  # Vosk は文字にできなかったが、声はした（Silero VAD）。待っている相手なら考える顔に
-            self._thinking = bool(
-                (self.enroll and self.enroll.active)
-                or time.monotonic() - self.last_reply < self.FOLLOW_UP
-                or (self.is_attended and self.is_attended()))
+            self._thinking = self._expecting()
         if self._thinking:
             # 「聞いて考えはじめた」顔。まだ返事するか分からないので、前の返事の字幕は消さない
             self.events.put(("listen", 4))
@@ -821,8 +840,11 @@ class Conversation:
             self.handle(rough)
         elif self.enroll and self.enroll.active:  # 名前を待っている: 声と字幕で聞きなおす（何回かまで）
             self.enroll.on_unclear(self._answer)
-        elif thinking:  # 考える顔のまま固まらないように、首をかしげて終わる
-            self.events.put(("confused", 1.5))
+        elif thinking:  # 聞き取れなかったことを、はっきり見せる（？の顔と字幕）
+            print("[聞きとれず] もういっかい たのむ")
+            self.events.put(("unclear", 0))
+            self.events.put(("confused", 2.0))
+            self.events.put(("caption", "ん？ もういっかい いって？"))
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -855,6 +877,7 @@ class Conversation:
             return None
         print(f"[聞こえた] {text}")
         self._thinking = False
+        self.events.put(("ack", 0))  # 聞きとれたよ（小さくうなずく）
         if (self.wake_words and is_just_call(text, self.wake_words)
                 and not (self.enroll and self.enroll.active)):
             # 名前を呼ばれただけ: 考えずにすぐ「なあに？」。そのあと少しのあいだは顔が見えなくても聞く
@@ -877,8 +900,10 @@ class Conversation:
         image = None
         if self.get_image and wants_look(text) and self.brain.vision:
             image = self.get_image()
+        t_ask = time.monotonic()
         emotion, answer = self.brain.reply(self._with_speaker(text), image)
         print(f"[{emotion}] {answer}")
+        self._log_timing(t_ask)
         if self.memory:
             self.memory.add_turn(text, answer)
         if self.language:
@@ -926,6 +951,15 @@ class Conversation:
         else:
             self._answer("joy", "いま べつの えを かいてるところ。まっててね。")
         return True
+
+    def _log_timing(self, t_ask):
+        """どこで時間がかかっているかをログに出す（返事がおそいときの調べもの用）。"""
+        tm = getattr(self.ears, "timing", None) or {}
+        now = time.monotonic()
+        if not tm.get("end") or now - tm["end"] > 120:
+            return
+        print(f"[時間] おくれ {tm.get('lag', 0):.1f}秒 / 書き起こし {tm.get('stt', 0):.1f}秒"
+              f" / 考える {now - t_ask:.1f}秒 / 話し終わりから返事まで {now - tm['end']:.1f}秒")
 
     def _speak(self, text):
         self.events.put(("caption", text))  # 字幕（スピーカーがなくても読める）

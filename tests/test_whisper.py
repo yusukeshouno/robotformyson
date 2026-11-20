@@ -173,8 +173,8 @@ def test_conversation_thinks_early_and_asks_again_while_enrolling():
     ears = conv.ears
     ears.on_listen("イモ こんにちは")                 # 話し終わってすぐ（書き起こしの前）
     assert conv.poll() == [("listen", 4)]   # 字幕は消さない考える顔
-    ears.on_unclear()                                # 聞き取れなかった → 首をかしげる
-    assert conv.poll() == [("confused", 1.5)]
+    ears.on_unclear()                                # 聞き取れなかった → ？の顔と字幕
+    assert conv.poll() == [("unclear", 0), ("confused", 2.0), ("caption", "ん？ もういっかい いって？")]
     conv.enroll.state, conv.enroll.last = "name", conv.enroll.clock()
     ears.on_unclear()                                # 名前を待っている → 聞きなおす
     ev = conv.poll()

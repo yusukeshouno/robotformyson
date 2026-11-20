@@ -122,3 +122,21 @@ def test_thinking_stages_and_bulb():
     g = Face(96)
     g.set_emotion("think"); g.update(1.0); g.set_emotion("neutral")   # 返事しなかった → 電球なし
     assert g.bulb_start < 0
+
+
+def test_hearing_and_ack_reactions():
+    import pygame
+    from robot.face import Face
+    pygame.init()
+    f = Face(96)
+    f.hear()
+    f.update(0.3)
+    assert f._hearing() > 0
+    f.render()                        # 音の波を描いても落ちない
+    f.ack()                           # 聞きとれた → 波が止まり、うなずく
+    assert f._hearing() == 0
+    f.update(0.2)
+    assert f._motion()[1] >= 1
+    g = Face(96)
+    g.hear(); g.update(0.1); g.set_emotion("think"); g.update(0.1)
+    assert g._hearing() == 0          # 考えはじめたら波は止まる

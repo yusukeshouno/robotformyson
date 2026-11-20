@@ -258,6 +258,8 @@ class Face:
         self.swap_start = -1.0        # 目の形を入れかえるまばたきの開始時刻
         self.sign_kind, self.sign_start = None, -10.0  # はい・いいえ（うなずく / 首をふる、〇×）
         self.bulb_start = -10.0       # 考えおわって答えが出た時刻（電球ぴかっ）
+        self.hearing_start = -10.0    # 声がしはじめた時刻（耳をすます）
+        self.ack_start = -10.0        # 聞きとれた時刻（小さくうなずく）
         self.custom = None            # AI が部品で組み立てた顔 (土台の感情, パラメータ)
         self.custom_until = None
         self.lo = pygame.Surface((N, N))
@@ -298,6 +300,22 @@ class Face:
         if self.emotion != "think":
             return None
         return "hmm" if self.t - self.entered >= THINK_HMM else "recall"
+
+    def hear(self):
+        """声がしはじめた: 耳をすます（目を少し大きく、まっすぐ見て、横に音の波）。"""
+        self.hearing_start = self.t
+
+    def ack(self):
+        """聞きとれた: 小さく1回うなずいて、耳の波を止める。"""
+        self.ack_start = self.t
+        self.hearing_start = -10.0
+
+    def _hearing(self):
+        """耳をすましている強さ 0..1（声がしてから最大 6 秒、ほかの顔になったら止める）。"""
+        th = self.t - self.hearing_start
+        if not 0 <= th < 6.0 or self.entered > self.hearing_start + 0.05:
+            return 0.0
+        return min(1.0, th / 0.15)
 
     def sign(self, kind):
         """kind='yes' でうなずいて〇、'no' で首をふって×を出す。"""
@@ -379,6 +397,8 @@ class Face:
             goal = (0.5 * math.cos(self.t * 5), 0.4 * math.sin(self.t * 5))
         elif e == "confused":
             goal = (0.5 if (self.t // 1.4) % 2 else -0.5, -0.2)
+        elif self._hearing() > 0:  # 耳をすましている: 相手をまっすぐ見る
+            goal = self.external_gaze or (0.0, 0.0)
         elif self.external_gaze is not None:
             self._update_avert()
             goal = self.avert_goal if self.t < self.avert_until else self.external_gaze
@@ -441,6 +461,12 @@ class Face:
             dy -= 0.6 * abs(math.sin(t * 2.8))
         elif m == "sway":
             dx += 1.6 * math.sin(t * 2.6)
+        ta = t - self.ack_start
+        if 0 <= ta < 0.45:  # 聞きとれた: こくっと1回
+            dy += 2.0 * math.sin(math.pi * ta / 0.45)
+        h = self._hearing()
+        if h > 0:           # 耳をすます: 目が少し大きくなる
+            pop *= 1 + 0.08 * h
         ts = t - self.sign_start
         if self.sign_kind and 0 <= ts < 1.2:  # 2回うなずく / 2回首をふる
             env = math.sin(math.pi * ts / 1.2)
@@ -699,8 +725,27 @@ class Face:
                 spr = SPR_BUBBLE if ph > 0.35 else SPR_BUBBLE_SMALL
                 self._stamp(spr, x, y, {"#": _mix(OFF, self.c_hi, a)})
 
+    def _draw_hearing(self, dx, dy):
+        """顔の両横に「(( ))」の音の波。外へ広がりながら消える。"""
+        h = self._hearing()
+        if h <= 0:
+            return
+        for k in range(3):
+            ph = (self.t * 1.6 + k / 3) % 1.0
+            a = h * math.sin(ph * math.pi)
+            if a < 0.1:
+                continue
+            col = _mix(OFF, self.c_main, a)
+            r = 3 + ph * 4
+            for side in (-1, 1):
+                cx = 24 + side * 16 + dx
+                for j in range(-3, 4):
+                    ang = j / 3 * 0.9
+                    self._put(round(cx + side * r * math.cos(ang)), round(20 + dy + r * math.sin(ang)), col)
+
     def _draw_fx(self, dx, dy):
         self._draw_sign()
+        self._draw_hearing(dx, dy)
         self._draw_bulb()
         t, te = self.t, self.t - self.entered
         fade_in = min(1.0, te / 0.3)

@@ -417,6 +417,15 @@ def main(argv=None):
                     if caption:  # 答えが出た電球（頭の上）が見えるよう、少しおくらせて出す
                         pending_caption = (dur, now + 0.8)
                     continue
+                if emo == "hearing":  # 声がしはじめた: 耳をすます顔
+                    face.hear()
+                    continue
+                if emo == "ack":      # 聞きとれた: こくっとうなずく
+                    face.ack()
+                    continue
+                if emo == "unclear":  # 聞きとれなかった（？の顔と字幕は別のできごとで出る）
+                    face.ack_start = -10.0
+                    continue
                 if emo == "listen":  # 話し終わってすぐの考える顔（字幕はそのまま）
                     emo = "think"
                 elif emo == "think" and caption:
