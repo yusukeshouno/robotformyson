@@ -93,6 +93,11 @@ def parse_args(argv=None):
                          "指定すると聞き取りが正確になる。ROBOT_WHISPER_URL でも可")
     ap.add_argument("--voice", default=None, help="Open JTalk の声ファイル (.htsvoice)")
     ap.add_argument("--pitch", type=float, default=2.0, help="声の高さ（半音単位）")
+    ap.add_argument("--voicevox-url", default=None,
+                    help="VOICEVOX（例 http://Mac-mini.local:50021）。子どもっぽい自然な声で話す。"
+                         "ROBOT_VOICEVOX_URL でも可。つながらないときは Open JTalk")
+    ap.add_argument("--voicevox-speaker", type=int, default=None,
+                    help="VOICEVOX の声の番号（3 = ずんだもん）。ROBOT_VOICEVOX_SPEAKER でも可")
     add_audio_args(ap)
     add_arm_args(ap)
     ap.add_argument("--no-growth", action="store_true", help="成長の記録をしない")
@@ -161,7 +166,11 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
             brain.extra_system = lambda: "\n".join(h for h in (f() for f in hints) if h)
         audio = cv.AudioSettings.load(args.mic, args.speaker, args.echo_tail)
         mic, speaker = audio.resolve()
-        voice = cv.Voice(args.voice, pitch=args.pitch, device=speaker)
+        voicevox = args.voicevox_url or os.environ.get("ROBOT_VOICEVOX_URL")
+        vv_speaker = args.voicevox_speaker or int(os.environ.get("ROBOT_VOICEVOX_SPEAKER", "3"))
+        voice = cv.make_voice(voicevox, vv_speaker, args.voice, pitch=args.pitch, device=speaker)
+        if voicevox:
+            print(f"声: VOICEVOX（{voicevox}、声の番号 {vv_speaker}）")
         whisper = args.whisper_url or os.environ.get("ROBOT_WHISPER_URL")
         ears = cv.Ears(args.vosk_model or cv.DEFAULT_VOSK, device=mic,
                        gate=cv.MicGate(audio.echo_tail),

@@ -10,6 +10,7 @@
 """
 import argparse
 import base64
+import io
 import json
 import os
 import queue
@@ -503,6 +504,69 @@ class Voice:
             return 0.0
         i = int((time.monotonic() - self._start) * self._fps)
         return float(env[i]) if 0 <= i < len(env) else 0.0
+
+
+class VoicevoxVoice(Voice):
+    """VOICEVOX（Mac などで動かす無料の読み上げソフト）で、子どもっぽい自然な声にする。
+
+    VOICEVOX に つながらないときは、Open JTalk の声で話す（だまってしまわないように）。
+    声（speaker）の番号は http://<Mac>:50021/speakers で一覧できる。3 = ずんだもん。
+    使うときはクレジット表記が必要（例「VOICEVOX:ずんだもん」）。README 参照。
+    """
+
+    RETRY = 30.0   # つながらなかったら、この秒数は Open JTalk を使う
+
+    def __init__(self, url, speaker=3, speed=1.0, pitch=0.0, play=True, device=None, fallback=None):
+        self.url, self.speaker = url.rstrip("/"), int(speaker)
+        self.v_speed, self.v_pitch = speed, pitch
+        self.play, self.device, self.fallback = play, device, fallback
+        self._channels = None
+        self._env, self._start, self._fps = None, 0.0, 30
+        self._down_until = 0.0
+
+    def _post(self, path, params, body=None, timeout=10):
+        import urllib.parse
+        import urllib.request
+        q = urllib.parse.urlencode(params)
+        data = json.dumps(body).encode() if body is not None else b""
+        req = urllib.request.Request(f"{self.url}{path}?{q}", data=data, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+
+    def synth(self, text):
+        if time.monotonic() >= self._down_until:
+            try:
+                query = json.loads(self._post("/audio_query", {"text": text, "speaker": self.speaker}))
+                query["speedScale"] = self.v_speed
+                query["pitchScale"] = self.v_pitch
+                wav = self._post("/synthesis", {"speaker": self.speaker}, query, timeout=30)
+                with wave.open(io.BytesIO(wav)) as w:
+                    rate = w.getframerate()
+                    data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+                    if w.getnchannels() > 1:
+                        data = data.reshape(-1, w.getnchannels())[:, 0].copy()
+                return data, rate
+            except Exception as e:
+                self._down_until = time.monotonic() + self.RETRY
+                print(f"[声] VOICEVOX につながりません（{e}）。しばらく Open JTalk で話します")
+        if self.fallback is None:
+            raise RuntimeError("VOICEVOX につながらず、Open JTalk もありません")
+        return self.fallback.synth(text)
+
+
+def make_voice(voicevox_url=None, speaker=3, voice=None, pitch=2.0, device=None):
+    """VOICEVOX の URL があればその声、なければ Open JTalk。"""
+    try:
+        jtalk = Voice(voice, pitch=pitch, device=device)
+    except RuntimeError as e:
+        if not voicevox_url:
+            raise
+        print(f"[声] Open JTalk は使えません（{e}）")
+        jtalk = None
+    if voicevox_url:
+        return VoicevoxVoice(voicevox_url, speaker, device=device, fallback=jtalk)
+    return jtalk
 
 
 # ---------------------------------------------------------------- 聞く

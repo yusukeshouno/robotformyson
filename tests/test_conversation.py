@@ -346,3 +346,38 @@ def test_ears_keep_running_while_replying():
     _t.sleep(0.2)
     assert listened == ["イモ ひとつめ", "イモ ふたつめ"]  # 1つめの返事の途中でも2つめを聞けた
     gate.set()
+
+
+def test_voicevox_voice_and_fallback(monkeypatch):
+    import numpy as np
+    import io as _io
+    import wave as _wave
+    buf = _io.BytesIO()
+    with _wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+        w.writeframes(np.zeros(2400, np.int16).tobytes())
+    calls = []
+
+    def post(self, path, params, body=None, timeout=10):
+        calls.append((path, params))
+        if path == "/audio_query":
+            return b'{"speedScale": 1, "pitchScale": 0}'
+        return buf.getvalue()
+
+    monkeypatch.setattr(cv.VoicevoxVoice, "_post", post)
+    v = cv.VoicevoxVoice("http://mac:50021", speaker=3, play=False)
+    data, rate = v.synth("こんにちは")
+    assert rate == 24000 and len(data) == 2400
+    assert calls[0] == ("/audio_query", {"text": "こんにちは", "speaker": 3})
+
+    class JTalk:
+        def synth(self, text):
+            return np.ones(10, np.int16), 48000
+
+    def down(self, *a, **k):
+        raise OSError("no route")
+
+    monkeypatch.setattr(cv.VoicevoxVoice, "_post", down)
+    v = cv.VoicevoxVoice("http://mac:50021", fallback=JTalk(), play=False)
+    assert v.synth("やあ")[1] == 48000          # つながらなければ Open JTalk
+    assert v.synth("やあ")[1] == 48000          # しばらくは VOICEVOX を試さない

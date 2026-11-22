@@ -81,6 +81,18 @@ python3 -m robot.camera check    # 5秒うつして、速さと顔が見える�
 
 ## 会話機能を使う
 
+### 子どもっぽい自然な声（VOICEVOX、なくても動く）
+
+ふつうの声は Open JTalk（Pi の上で動く、少し機械っぽい）。Mac などで無料の [VOICEVOX](https://voicevox.hiroshiba.jp/) を動かすと、
+キャラクターの自然な声で話せます。VOICEVOX ENGINE を `--host 0.0.0.0` で起動しておき、Pi では
+
+```bash
+ROBOT_VOICEVOX_URL=http://Mac-mini.local:50021 ROBOT_VOICEVOX_SPEAKER=3 python3 -m robot.main --talk
+```
+
+声の番号は `http://Mac-mini.local:50021/speakers` で見られます（3 = ずんだもん）。VOICEVOX につながらないときは Open JTalk で話します。
+**声を使うときは各キャラクターの利用規約に従い、「VOICEVOX:ずんだもん」のようなクレジットを表示してください。**
+
 聞く（Vosk）と話す（Open JTalk）は Pi の上でオフラインで動きます。考える部分は次から選べます。
 
 | 頭脳 | 費用 | 会話 | 「これなに？」 |
