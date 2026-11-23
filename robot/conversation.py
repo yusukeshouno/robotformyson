@@ -941,6 +941,7 @@ class Conversation:
             from .faces import EnrollDialog
             self.enroll = EnrollDialog(faces, show=lambda t: self.events.put(("caption", t)))
         self.artist = None                # drawing.Artist（お絵かき）/ None
+        self.is_sleeping = None           # () -> 眠っているか。眠っているあいだは名前を呼ばれたときだけ返事
         self.events = queue.Queue()
         self.last_reply = 0.0
         self._speak_lock = threading.Lock()
@@ -952,6 +953,8 @@ class Conversation:
 
     def _expecting(self):
         """いま話しかけられていそうか（顔が見える・返事のすぐあと・顔の登録中）。"""
+        if self.asleep():
+            return False
         return bool((self.enroll and self.enroll.active)
                     or time.monotonic() - self.last_reply < self.FOLLOW_UP
                     or (self.is_attended and self.is_attended()))
@@ -977,6 +980,9 @@ class Conversation:
         顔の登録で「あってる？」と聞いたあとは、Vosk が「うん」「ちがう」と聞いていればそれを使う。
         """
         thinking, self._thinking = self._thinking, False
+        called = bool(rough and self.wake_words and contains_any(rough, self.wake_words))
+        if self.asleep() and not called:  # 眠っているあいだの物音・話し声には反応しない
+            return
         if (rough and self.wake_words and contains_any(rough, self.wake_words)
                 and not (self.enroll and self.enroll.active)):
             # 「イモ…」と呼ばれたのに、そのあとが聞き取れなかった: 呼ばれたことには答えて、もう一度聞く
@@ -1015,11 +1021,16 @@ class Conversation:
             except Exception as e:  # 1回失敗しても聞き続ける
                 print(f"[会話] エラー: {e}")
 
+    def asleep(self):
+        return bool(self.is_sleeping and self.is_sleeping())
+
     def should_reply(self, text):
         if self.enroll and self.enroll.active:  # 顔の登録の途中（「うん」も聞く）
             return True
         if contains_any(text, self.wake_words):  # 「芋」1文字でも呼ばれたことになる
             return True
+        if self.asleep():  # 眠っているあいだは、名前を呼ばれたときだけ起きて返事する
+            return False
         if len(text) < 2:
             return False
         if time.monotonic() - self.last_reply < self.FOLLOW_UP:

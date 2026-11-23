@@ -432,3 +432,13 @@ def test_name_only_call_spotted_when_whisper_empty():
     ep = ears.gate.epoch
     assert ears.process((ep, pcm)) is None
     assert ears.process((ep, pcm)) == "芋"
+
+
+def test_asleep_only_wakes_on_name():
+    c = cv.Conversation(brain=None, wake_words=("イモ",), is_attended=lambda: True)
+    c.is_sleeping = lambda: True
+    assert not c.should_reply("ボールは3種類")      # 顔が見えていても、眠っていたら返事しない
+    assert c.should_reply("芋")                      # 名前を呼ばれたら起きる
+    assert not c._expecting()
+    c.is_sleeping = lambda: False
+    assert c.should_reply("ボールは3種類")

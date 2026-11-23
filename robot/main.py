@@ -59,6 +59,10 @@ def parse_args(argv=None):
                     help="ウィンドウの大きさ(px)。一辺だけ（720）か 幅x高さ（480x800）")
     ap.add_argument("--fullscreen", action="store_true")
     ap.add_argument("--fps", type=int, default=20)  # Pi 4 では 30 だと耳（音の処理）の時間がなくなる
+    ap.add_argument("--sleep-fps", type=int, default=5,
+                    help="眠っているときのコマ数（少ないほど Pi が楽になり、耳がよく聞ける）")
+    ap.add_argument("--sleep-dim", type=float, default=0.75,
+                    help="眠っているときに画面を暗くする強さ（0 = 暗くしない、1 = まっくら）")
     ap.add_argument("--mouse", action="store_true", help="マウスを顔として扱う（カメラ不要）")
     ap.add_argument("--no-camera", action="store_true")
     ap.add_argument("--camera", choices=["auto", "picamera", "opencv"], default="auto")
@@ -318,6 +322,14 @@ def main(argv=None):
         from .drawing import Doodler, DrawingShow
         doodler = Doodler(artist, args.draw_every)
     last_heard = time.monotonic()
+    if conv:
+        conv.is_sleeping = lambda: engine.sleeping  # 眠っているあいだは「イモ」と呼ばれたときだけ返事
+    dim = None
+    if args.sleep_dim > 0:
+        dim = pygame.Surface(canvas.get_size())
+        dim.fill((0, 0, 0))
+        dim.set_alpha(int(255 * min(1.0, args.sleep_dim)))
+    was_sleeping = False
 
     def say(text):
         if conv:
@@ -338,7 +350,7 @@ def main(argv=None):
     clock = pygame.time.Clock()
     running = True
     while running:
-        dt = clock.tick(args.fps) / 1000.0
+        dt = clock.tick(args.sleep_fps if engine.sleeping else args.fps) / 1000.0
         now = time.monotonic()
         if args.run_seconds and now - start > args.run_seconds:
             break
@@ -398,8 +410,10 @@ def main(argv=None):
         if listener:
             for emo, dur in listener.poll():
                 engine.express(emo, dur, now)
-        if greeter:  # 家族が来たら、名前を呼んであいさつ
+        if greeter:  # 家族が来たら、名前を呼んであいさつ（眠っているあいだはしない）
             for emo, text in greeter.poll():
+                if engine.sleeping:
+                    continue
                 engine.express(emo if emo in EMOTION_NAMES else "joy", 3.0, now)
                 if arms:
                     arms.wave()
@@ -484,6 +498,9 @@ def main(argv=None):
                              topic=last_topic(conv) if recent else None)
 
         emotion = engine.update(now)
+        if engine.sleeping != was_sleeping:
+            was_sleeping = engine.sleeping
+            print("[ねむり] ねむりました（「イモ」で おきます）" if was_sleeping else "[ねむり] おきた")
         face.set_emotion(emotion)
         face.set_mood(*engine.mood(now))
         face.look_at((max(-1, min(1, fx)), max(-1, min(1, fy))) if present else None)
@@ -529,6 +546,8 @@ def main(argv=None):
                 label += f"  who={faces.current()[0] or '-'}"  # 日本語は既定のフォントで出ないので id
             canvas.blit(font.render(label, True, (200, 200, 200)), (8, ch - font.get_height() - 8))
 
+        if engine.sleeping and dim is not None:  # 眠っているあいだは画面を暗く
+            canvas.blit(dim, (0, 0))
         screen.fill(BG)
         out = pygame.transform.rotate(canvas, -args.screen_rotate) if args.screen_rotate else canvas
         screen.blit(out, ((sw - out.get_width()) // 2, (sh - out.get_height()) // 2))

@@ -5,7 +5,7 @@ from collections import deque
 
 
 class EmotionEngine:
-    SLEEP_AFTER = 40.0   # 誰もいない状態がこの秒数続くと眠る
+    SLEEP_AFTER = 120.0  # 顔も見えず、話しかけられもしない状態がこの秒数続くと眠る（起きるのは「イモ」と呼ばれたとき）
     LOVE_EVERY = 20.0    # 見つめられ続けると時々ハート目
     # 返事の気持ちの「余韻」。話し終えたあとも少しのあいだ顔に残り、ゆっくり消える。
     # 悲しい・怒りは子どもを引き止めないよう、短く・弱く残す。
@@ -73,6 +73,9 @@ class EmotionEngine:
         if present == self.present:
             return
         self.present = present
+        if self.sleeping:                # 眠っているあいだは、顔が見えても起きない（「イモ」で起きる）
+            self.present_since = now
+            return
         if present:
             self.present_since = now
             if not self._wake(now):
@@ -116,6 +119,8 @@ class EmotionEngine:
         if self.current:
             return self.current
 
+        if self.sleeping:
+            return "sleepy"
         if self.present:
             if now - self.last_love > self.LOVE_EVERY and now - self.present_since > 10:
                 self.last_love = now
