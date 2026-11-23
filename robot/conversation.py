@@ -490,7 +490,14 @@ class Voice:
                 if self._channels is None:
                     self._channels = output_channels(self.device)
                 sd.play(to_channels(data, self._channels), rate, device=self.device)
-                sd.wait()
+                # sd.wait() は、音の出口（PipeWire）の調子が悪いと終わらないことがある。
+                # そのあいだマイクも閉じたままで、イモが何も聞かなくなっていた。長さ＋2秒で打ち切る
+                limit = time.monotonic() + len(data) / rate + 2.0
+                while sd.get_stream().active and time.monotonic() < limit:
+                    time.sleep(0.05)
+                if sd.get_stream().active:
+                    print("[声] 再生が終わらないので止めます")
+                    sd.stop()
             else:
                 time.sleep(len(data) / rate)
         except Exception as e:
