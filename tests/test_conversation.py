@@ -381,3 +381,12 @@ def test_voicevox_voice_and_fallback(monkeypatch):
     v = cv.VoicevoxVoice("http://mac:50021", fallback=JTalk(), play=False)
     assert v.synth("やあ")[1] == 48000          # つながらなければ Open JTalk
     assert v.synth("やあ")[1] == 48000          # しばらくは VOICEVOX を試さない
+
+
+def test_fix_name_accent():
+    q = {"accent_phrases": [
+        {"moras": [{"text": "イ"}, {"text": "モ"}, {"text": "ダ"}, {"text": "ヨ"}], "accent": 2},
+        {"moras": [{"text": "イ"}, {"text": "ヌ"}], "accent": 2}]}
+    cv.fix_name_accent(q, "イモ")
+    assert q["accent_phrases"][0]["accent"] == 1   # イ↘モだよ
+    assert q["accent_phrases"][1]["accent"] == 2   # ほかの言葉はそのまま

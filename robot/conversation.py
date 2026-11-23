@@ -506,6 +506,19 @@ class Voice:
         return float(env[i]) if 0 <= i < len(env) else 0.0
 
 
+def fix_name_accent(query, kana, accent=1):
+    """VOICEVOX の読み方を直す: 名前（例「イモ」）で始まるまとまりは、accent 番目のあとで下がる。
+
+    「イモ」は「イ」が高く「モ」で下がる（accent=1）。VOICEVOX はそう読まないことがあるので、
+    名前で始まるまとまり（accent phrase）の下がる位置を書きかえる。"""
+    n = len(kana)
+    for ph in query.get("accent_phrases", []):
+        moras = ph.get("moras", [])
+        if len(moras) >= n and "".join(m.get("text", "") for m in moras[:n]) == kana:
+            ph["accent"] = accent
+    return query
+
+
 class VoicevoxVoice(Voice):
     """VOICEVOX（Mac などで動かす無料の読み上げソフト）で、子どもっぽい自然な声にする。
 
@@ -526,6 +539,8 @@ class VoicevoxVoice(Voice):
         self._channels = None
         self._env, self._start, self._fps = None, 0.0, 30
         self._down_until = 0.0
+        self.name_kana = "イモ"   # 自分の名前は「イ」が高く「モ」で下がる（頭高）。ROBOT_NAME_KANA で変えられる
+        self.name_kana = os.environ.get("ROBOT_NAME_KANA", self.name_kana)
 
     def _post(self, path, params, body=None, timeout=10):
         import urllib.parse
@@ -544,6 +559,7 @@ class VoicevoxVoice(Voice):
                 query["speedScale"] = self.v_speed
                 query["pitchScale"] = self.v_pitch
                 query["volumeScale"] = self.volume
+                fix_name_accent(query, self.name_kana)
                 wav = self._post("/synthesis", {"speaker": self.speaker}, query, timeout=30)
                 with wave.open(io.BytesIO(wav)) as w:
                     rate = w.getframerate()
