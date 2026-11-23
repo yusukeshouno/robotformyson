@@ -864,7 +864,7 @@ class Ears:
 
     STALL = 10.0        # マイクの音がこの秒数こなければ、録音を開きなおす
     BACKLOG = 30        # 処理が追いつかず、たまった音がこれ以上なら古い音を捨てる（3秒ぶん）
-    HEARTBEAT = 600.0   # この秒数ごとに「耳は動いている」とログに出す
+    HEARTBEAT = 300.0   # この秒数ごとに「耳は動いている」とログに出す
 
     def listen(self):
         """発話ごとに文字を返すジェネレーター。
@@ -908,7 +908,11 @@ class Ears:
                         now = time.monotonic()
                         if now - last_beat > self.HEARTBEAT:
                             last_beat = now
-                            print(f"[耳] 聞いています（たまった音 {backlog}）")
+                            extra = ""
+                            if self.segmenter and hasattr(self.segmenter, "stats"):
+                                prob, level = self.segmenter.stats()
+                                extra = f"、声らしさ 最大 {prob:.2f}・音の大きさ 最大 {level:.2f}"
+                            print(f"[耳] 聞いています（たまった音 {backlog}{extra}）")
                         text = self.process(item)
                         if text:
                             yield text

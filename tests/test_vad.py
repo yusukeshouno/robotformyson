@@ -115,3 +115,22 @@ def test_listen_reopens_stream_when_audio_stops(monkeypatch):
     ears.process = lambda item: "きこえた"
     assert next(ears.listen()) == "きこえた"
     assert len(opened) == 2
+
+
+def test_vad_state_is_reset_while_idle():
+    from robot.vad import Segmenter
+
+    class V:
+        resets = 0
+        def reset(self):
+            V.resets += 1
+        def prob(self, frame):
+            return 0.0
+
+    seg = Segmenter(V(), rate=16000)
+    start = V.resets
+    chunk = np.zeros(1600, np.int16).tobytes()   # 0.1秒
+    for _ in range(int(Segmenter.IDLE_RESET / 0.1) + 5):
+        seg.feed(chunk)
+    assert V.resets > start                      # 静かなあいだに記憶を消した
+    assert seg.stats() == (0.0, 0.0)

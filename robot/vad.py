@@ -57,6 +57,9 @@ class Segmenter:
     END_SILENCE = 0.7
     MIN_SPEECH = 0.2
     MAX_UTTERANCE = 15.0
+    IDLE_RESET = 60.0   # 話していない時間がこの秒数つづいたら、VAD の中の記憶を消す
+    # （実機で、起動して1時間ほどすると声らしさが 0.01 未満のまま上がらなくなり、何も聞かなくなった。
+    #   Silero VAD は1つの音声ごとに記憶を消して使う作りなので、静かなあいだにときどき消しておく）
 
     def __init__(self, vad, rate=16000):
         self.vad, self.rate = vad, rate
@@ -81,6 +84,14 @@ class Segmenter:
         self.active = False
         self.speech = self.silence = 0.0
         self.last_prob = 0.0
+        self.idle = 0.0
+        self.max_prob = self.max_level = 0.0   # stats() で読む（ログで「聞こえているか」を見る）
+
+    def stats(self):
+        """前に呼んでからの (声らしさの最大, 音の大きさの最大 0〜1)。呼ぶと0にもどる。"""
+        out = (self.max_prob, self.max_level)
+        self.max_prob = self.max_level = 0.0
+        return out
 
     @property
     def speaking(self):
@@ -103,12 +114,21 @@ class Segmenter:
         p = max(probs) if probs else self.last_prob
         self.last_prob = p
         dur = len(pcm_bytes) / 2 / self.rate
+        x = np.frombuffer(pcm_bytes[:len(pcm_bytes) // 2 * 2], np.int16)
+        if len(x):
+            self.max_level = max(self.max_level, float(np.abs(x).max()) / 32768)
+        self.max_prob = max(self.max_prob, p)
         if not self.active:
+            self.idle += dur
+            if self.idle >= self.IDLE_RESET:
+                self.vad.reset()
+                self.idle = 0.0
             self.ring.append(pcm_bytes)
             while sum(len(c) for c in self.ring) / 2 / self.rate > self.PRE_ROLL + dur:
                 self.ring.pop(0)
             if p >= self.START:
                 self.active, self.buf, self.ring = True, self.ring, []
+                self.idle = 0.0
                 self.speech, self.silence = dur, 0.0
             return None
         self.buf.append(pcm_bytes)
