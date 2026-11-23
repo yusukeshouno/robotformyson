@@ -516,8 +516,11 @@ class VoicevoxVoice(Voice):
 
     RETRY = 30.0   # つながらなかったら、この秒数は Open JTalk を使う
 
-    def __init__(self, url, speaker=3, speed=1.0, pitch=0.0, play=True, device=None, fallback=None):
+    def __init__(self, url, speaker=3, speed=1.0, pitch=0.0, play=True, device=None, fallback=None,
+                 volume=None):
         self.url, self.speaker = url.rstrip("/"), int(speaker)
+        # 声の大きさ（1.0 がふつう。小さいスピーカーなら 1.5〜2.0）。ROBOT_VOICEVOX_VOLUME でも変えられる
+        self.volume = float(volume if volume is not None else os.environ.get("ROBOT_VOICEVOX_VOLUME", "1.0"))
         self.v_speed, self.v_pitch = speed, pitch
         self.play, self.device, self.fallback = play, device, fallback
         self._channels = None
@@ -540,6 +543,7 @@ class VoicevoxVoice(Voice):
                 query = json.loads(self._post("/audio_query", {"text": text, "speaker": self.speaker}))
                 query["speedScale"] = self.v_speed
                 query["pitchScale"] = self.v_pitch
+                query["volumeScale"] = self.volume
                 wav = self._post("/synthesis", {"speaker": self.speaker}, query, timeout=30)
                 with wave.open(io.BytesIO(wav)) as w:
                     rate = w.getframerate()
