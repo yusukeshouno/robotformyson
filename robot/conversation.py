@@ -706,6 +706,7 @@ class Ears:
         self._loud_bytes = 0   # この発話で「声かも」だった音の長さ（バイト）
 
     SPOT_MAX = 2.5   # 名前だけの呼びかけとみなす発話の長さ（秒）の上限
+    SPOT_CONF = 0.9  # Vosk の自信がこれより低ければ、名前とみなさない
 
     def spot_name(self, words, recognizer=None):
         """名前だけの呼びかけ（「イモ」）を Vosk で見つける係を足す。
@@ -720,6 +721,7 @@ class Ears:
                 return self
             recognizer = KaldiRecognizer(model, self.rate,
                                          json.dumps(list(self.spot_words) + ["[unk]"], ensure_ascii=False))
+            recognizer.SetWords(True)   # 言葉ごとの自信（conf）を見る
         self.spotter = recognizer
         return self
 
@@ -727,8 +729,17 @@ class Ears:
         """名前が聞こえたら、その言葉。なければ ""。"""
         if self.spotter is None:
             return ""
-        heard = json.loads(self.spotter.FinalResult()).get("text", "").replace("[unk]", "").split()
-        return heard[0] if len(heard) == 1 and heard[0] in self.spot_words else ""
+        r = json.loads(self.spotter.FinalResult())
+        words = [w for w in r.get("result", []) if w.get("word") != "[unk]"]
+        heard = r.get("text", "").replace("[unk]", "").split()
+        if len(heard) != 1 or heard[0] not in self.spot_words:
+            return ""
+        # 話し声の中の「いも」に似た音で起きないよう、名前だけで、自信が高いときにかぎる
+        if words and min(w.get("conf", 1.0) for w in words) < self.SPOT_CONF:
+            return ""
+        if len(r.get("result", [])) > 1:  # 名前のほかにも何か言っていた（[unk]）
+            return ""
+        return heard[0]
 
     def mute(self, on):
         """on=True で閉じる。False で開く（実際に聞きはじめるのは余韻の時間のあと）。"""

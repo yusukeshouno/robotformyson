@@ -330,6 +330,8 @@ def main(argv=None):
         dim.fill((0, 0, 0))
         dim.set_alpha(int(255 * min(1.0, args.sleep_dim)))
     was_sleeping = False
+    from .presence import PresenceFilter
+    presence = PresenceFilter()
 
     def say(text):
         if conv:
@@ -394,6 +396,7 @@ def main(argv=None):
         present, fx, fy = False, 0.0, 0.0
         if tracker:
             present, fx, fy = tracker.get()
+            present = presence.update(present, fx, fy, now)  # 一瞬の見まちがい・動かない写真は数えない
             fx, fy = fx * args.gaze_gain, fy * args.gaze_gain + args.gaze_offset_y
         elif args.mouse and pygame.mouse.get_focused():
             mx, my = pygame.mouse.get_pos()
