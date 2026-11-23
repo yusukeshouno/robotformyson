@@ -519,6 +519,17 @@ def fix_name_accent(query, kana, accent=1):
     return query
 
 
+def spot_words(name):
+    """名前を Vosk の言葉の候補にする（ひらがな・カタカナ・別名）。「イモ」→ イモ・いも・芋。"""
+    words = list(wake_variants(name))
+    kata = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in name)
+    hira = "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in name)
+    for w in (name, kata, hira):
+        if w not in words:
+            words.append(w)
+    return tuple(words)
+
+
 class VoicevoxVoice(Voice):
     """VOICEVOX（Mac などで動かす無料の読み上げソフト）で、子どもっぽい自然な声にする。
 
@@ -669,8 +680,10 @@ class Ears:
                 raise RuntimeError(f"音声認識モデルがありません: {model_path}（README 参照）")
             if rate is None:
                 rate = pick_rate(device)
-            recognizer = KaldiRecognizer(Model(model_path), rate)
+            self._model = Model(model_path)
+            recognizer = KaldiRecognizer(self._model, rate)
         self.rate = rate or 16000
+        self.spotter, self.spot_words = None, ()
         self.rec = recognizer
         self.q = queue.Queue()
         self._epoch = self.gate.epoch
@@ -684,6 +697,31 @@ class Ears:
         self.floor = 0.0       # 部屋の雑音の大きさ（RMS、int16）
         self._quiet_left = 0   # あと何バイト「静か」が続けば、前の音を捨ててよいか
         self._loud_bytes = 0   # この発話で「声かも」だった音の長さ（バイト）
+
+    SPOT_MAX = 2.5   # 名前だけの呼びかけとみなす発話の長さ（秒）の上限
+
+    def spot_name(self, words, recognizer=None):
+        """名前だけの呼びかけ（「イモ」）を Vosk で見つける係を足す。
+
+        Whisper は「イモ」のような短い1語を、よく別の言葉（外国語など）にしてしまい、空になる。
+        Vosk に「この言葉かそれ以外か」だけを選ばせると、短い1語に強い。"""
+        self.spot_words = tuple(words)
+        if recognizer is None:
+            from vosk import KaldiRecognizer
+            model = getattr(self, "_model", None)
+            if model is None:
+                return self
+            recognizer = KaldiRecognizer(model, self.rate,
+                                         json.dumps(list(self.spot_words) + ["[unk]"], ensure_ascii=False))
+        self.spotter = recognizer
+        return self
+
+    def _spotted(self):
+        """名前が聞こえたら、その言葉。なければ ""。"""
+        if self.spotter is None:
+            return ""
+        heard = json.loads(self.spotter.FinalResult()).get("text", "").replace("[unk]", "").split()
+        return heard[0] if len(heard) == 1 and heard[0] in self.spot_words else ""
 
     def mute(self, on):
         """on=True で閉じる。False で開く（実際に聞きはじめるのは余韻の時間のあと）。"""
@@ -706,6 +744,8 @@ class Ears:
             return None                       # 話す前に録った音・話している間の音
         if epoch != self._epoch:              # 話したあと最初の音: 途中経過を捨てる
             self.rec.Reset()
+            if self.spotter is not None:
+                self.spotter.Reset()
             self.buf.clear()
             self._rough = []
             if self.segmenter:
@@ -756,11 +796,16 @@ class Ears:
             for c in chunks:
                 if self.rec.AcceptWaveform(c):
                     self._rough.append(json.loads(self.rec.Result()).get("text", ""))
+                if self.spotter is not None:
+                    self.spotter.AcceptWaveform(c)
         if audio is None:
             if not was_speaking and not self.segmenter.speaking:
                 self._rough = []
             return None
         self._rough.append(json.loads(self.rec.FinalResult()).get("text", ""))
+        spotted = self._spotted()
+        if len(audio) / 2 / self.rate > self.SPOT_MAX:
+            spotted = ""
         rough, self._rough = "".join(self._rough).replace(" ", ""), []
         t_end = time.monotonic()
         self.timing = {"end": t_end, "lag": self.lag, "stt": 0.0}
@@ -772,6 +817,9 @@ class Ears:
             self.timing["stt"] = time.monotonic() - t_end
             if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
                 text = better
+                if not text and spotted:  # Whisper は空でも、短い発話で名前だけ聞こえていた: 呼ばれた
+                    print(f"[耳] 名前だけ聞こえた（Vosk: {spotted}）")
+                    text = spotted
                 if not text and self.on_unclear:
                     self.on_unclear(rough)
         if text and self.gate.is_open() and self.gate.epoch == epoch:

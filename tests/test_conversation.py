@@ -390,3 +390,45 @@ def test_fix_name_accent():
     cv.fix_name_accent(q, "イモ")
     assert q["accent_phrases"][0]["accent"] == 1   # イ↘モだよ
     assert q["accent_phrases"][1]["accent"] == 2   # ほかの言葉はそのまま
+
+
+def test_name_only_call_spotted_when_whisper_empty():
+    """「イモ」だけだと Whisper は空にしがち。Vosk の名前見張りが聞いていれば呼ばれたことにする。"""
+    import json as _json
+    import numpy as np
+
+    class Rec:
+        def __init__(self, text=""):
+            self.text = text
+        def AcceptWaveform(self, c):
+            return False
+        def Result(self):
+            return '{"text": ""}'
+        def FinalResult(self):
+            return _json.dumps({"text": self.text}, ensure_ascii=False)
+        def Reset(self):
+            pass
+
+    class Seg:
+        speaking = False
+        buf = []
+        def __init__(self):
+            self.n = 0
+        def feed(self, pcm):
+            self.n += 1
+            if self.n == 1:
+                self.speaking = True
+                self.buf = [pcm]
+                return None
+            self.speaking = False
+            return b"\0" * 16000 * 2   # 1秒の発話
+        def reset(self):
+            pass
+
+    ears = cv.Ears(None, recognizer=Rec(), transcriber=lambda a, r: "")
+    ears.segmenter = Seg()
+    ears.spot_name(cv.spot_words("イモ"), recognizer=Rec("芋"))
+    pcm = np.zeros(1600, np.int16).tobytes()
+    ep = ears.gate.epoch
+    assert ears.process((ep, pcm)) is None
+    assert ears.process((ep, pcm)) == "芋"

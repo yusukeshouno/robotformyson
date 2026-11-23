@@ -178,6 +178,8 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
         if not args.no_vad:  # 話しはじめ・終わりは Silero VAD で（小さな声に強い）
             from .vad import Segmenter
             ears.segmenter = Segmenter.create(ears.rate)
+        # 「イモ」と名前だけ呼ばれたとき、Whisper は空にしがち。Vosk に名前だけを見張らせる
+        ears.spot_name(cv.spot_words(args.name))
         print(f"聞き取り: {'Whisper（' + whisper + '）、つながらないときは Vosk' if whisper else 'Vosk'}"
               f"、区切り: {'Silero VAD' if ears.segmenter else 'Vosk'}")
     except Exception as e:
