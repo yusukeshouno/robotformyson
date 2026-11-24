@@ -35,3 +35,15 @@ def test_presence_ignores_flicker_and_still_photo():
         t += 1
         ok = q.update(True, 0.1 + (t % 10) * 0.01, 0.1, t)
     assert ok
+
+
+def test_sleeps_after_quiet_even_with_face():
+    e = EmotionEngine(0.0)
+    t = 0.0
+    while t < EmotionEngine.QUIET_SLEEP_AFTER + 15:
+        e.on_face(True, t)
+        e.update(t)
+        t += 5
+    assert e.sleeping                         # 顔は見えていても、話しかけられなければ眠る
+    e.notice(t)
+    assert not e.sleeping

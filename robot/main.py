@@ -59,6 +59,10 @@ def parse_args(argv=None):
                     help="ウィンドウの大きさ(px)。一辺だけ（720）か 幅x高さ（480x800）")
     ap.add_argument("--fullscreen", action="store_true")
     ap.add_argument("--fps", type=int, default=20)  # Pi 4 では 30 だと耳（音の処理）の時間がなくなる
+    ap.add_argument("--sleep-after", type=float, default=2.0,
+                    help="顔も見えず話しかけられもしないとき、眠るまでの分数")
+    ap.add_argument("--sleep-after-quiet", type=float, default=5.0,
+                    help="顔が見えていても、話しかけられないとき眠るまでの分数（0 で眠らない）")
     ap.add_argument("--sleep-fps", type=int, default=5,
                     help="眠っているときのコマ数（少ないほど Pi が楽になり、耳がよく聞ける）")
     ap.add_argument("--sleep-dim", type=float, default=0.75,
@@ -260,6 +264,8 @@ def main(argv=None):
 
     face = Face(S)
     engine = EmotionEngine(time.monotonic())
+    engine.SLEEP_AFTER = args.sleep_after * 60
+    engine.QUIET_SLEEP_AFTER = args.sleep_after_quiet * 60
     font = pygame.font.Font(None, max(16, S // 24))
 
     tracker = None
