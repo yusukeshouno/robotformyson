@@ -731,6 +731,8 @@ class Ears:
         if self.spotter is None:
             return ""
         r = json.loads(self.spotter.FinalResult())
+        self.last_spot = " ".join(f"{w.get('word')}({w.get('conf', 1.0):.2f})"
+                                  for w in r.get("result", [])) or r.get("text", "")
         words = [w for w in r.get("result", []) if w.get("word") != "[unk]"]
         heard = r.get("text", "").replace("[unk]", "").split()
         if len(heard) != 1 or heard[0] not in self.spot_words:
@@ -836,6 +838,9 @@ class Ears:
             self.timing["stt"] = time.monotonic() - t_end
             if better is not None:  # "" は「声ではなかった」。Vosk の当て推量は使わない
                 text = better
+                if not text and self.spotter is not None:  # なぜ名前に気づかなかったかを見るため
+                    print(f"[耳] Whisper は空。名前の見張り: {getattr(self, 'last_spot', '') or '何もなし'}"
+                          f"（{len(audio) / 2 / self.rate:.1f}秒）")
                 if not text and spotted:  # Whisper は空でも、短い発話で名前だけ聞こえていた: 呼ばれた
                     print(f"[耳] 名前だけ聞こえた（Vosk: {spotted}）")
                     text = spotted

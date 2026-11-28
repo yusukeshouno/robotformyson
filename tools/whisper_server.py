@@ -17,6 +17,7 @@ Pi 側は イモの起動に --whisper-url http://Mac-mini.local:8765 を付け�
 import argparse
 import io
 import json
+import os
 import threading
 import time
 import wave
@@ -144,7 +145,33 @@ class Engine:
                          "avg_logprob": s.avg_logprob, "compression_ratio": s.compression_ratio}
                         for s in out]
         kept = [s for s in segs if keep_segment(s)]
+        self.last_segs = segs   # 空になったわけをログに出すため
         return "".join(s["text"] for s in kept), kept
+
+
+SAVE_DIR = os.path.expanduser(os.environ.get("IMO_SAVE_EMPTY", "~/imo-clips"))
+SAVE_KEEP = 40   # 空になった音を、新しいほうからこの数だけ残す（何が届いているかを聞いて確かめる用）
+
+
+def save_clip(audio, why=""):
+    """空になった音を WAV で残す。SAVE_DIR を "" にすると残さない。"""
+    if not SAVE_DIR:
+        return
+    try:
+        os.makedirs(SAVE_DIR, exist_ok=True)
+        name = os.path.join(SAVE_DIR, time.strftime("empty-%Y%m%d-%H%M%S.wav"))
+        with wave.open(name, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(RATE)
+            w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+        with open(name[:-4] + ".txt", "w") as f:
+            f.write(why)
+        old = sorted(n for n in os.listdir(SAVE_DIR) if n.startswith("empty-"))
+        for n in old[:-SAVE_KEEP * 2]:
+            os.remove(os.path.join(SAVE_DIR, n))
+    except OSError as e:
+        print(f"    音を残せませんでした（{e}）", flush=True)
 
 
 def make_handler(engine):
@@ -181,6 +208,13 @@ def make_handler(engine):
             raw, kept = engine.transcribe(audio)
             text = clean(raw, sure_name=name_is_sure(kept, voiced_seconds(audio)))
             print(f"[{len(audio) / RATE:4.1f}秒 → {time.monotonic() - t0:4.2f}秒] {text}", flush=True)
+            if not text:
+                why = " / ".join(
+                    f"「{s.get('text', '').strip()}」 無音{s.get('no_speech_prob', 0):.2f}"
+                    f" 自信{s.get('avg_logprob', 0):.2f} 圧縮{s.get('compression_ratio', 0):.1f}"
+                    for s in getattr(engine, "last_segs", [])) or "区切りなし"
+                print(f"    空のわけ: {why}", flush=True)
+                save_clip(audio, why)
             self._send(200, {"text": text})
 
         def log_message(self, *args):
