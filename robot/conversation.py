@@ -10,6 +10,7 @@
 """
 import argparse
 import base64
+import contextlib
 import io
 import json
 import os
@@ -473,6 +474,8 @@ class OllamaBrain(_BrainBase):
                     except Exception as e:  # 話す側の失敗で、返事づくりを止めない
                         print(f"[会話] 文を話せませんでした（{e}）")
 
+        t0 = time.monotonic()
+        t_first = None
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 for line in r:   # 1行に1つの JSON（"done": true で終わり）
@@ -481,10 +484,17 @@ class OllamaBrain(_BrainBase):
                     part = json.loads(line.decode("utf-8"))
                     if part.get("error"):
                         raise BrainError("sad", "ごめんね、うまく かんがえられなかった。")
+                    if t_first is None:
+                        t_first = time.monotonic() - t0
                     give(stream.feed(part.get("message", {}).get("content", "")))
+                    if part.get("done"):
+                        self._log_stats(part, t_first)
                     if stream.done or part.get("done"):
                         break   # 決まりの長さに達したら、つづきは作らせない（接続を閉じると止まる）
             give(stream.finish())
+            if stream.done and t_first is not None:
+                print(f"[時間] Ollama: 最初の文字まで {t_first:.1f}秒 / ぜんぶで {time.monotonic() - t0:.1f}秒"
+                      f"（{len(stream.raw)}文字で打ち切り）")
         except urllib.error.HTTPError as e:
             print(f"[会話] Ollama エラー {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}")
             raise BrainError("sad", "ごめんね、うまく かんがえられなかった。")
@@ -503,6 +513,15 @@ class OllamaBrain(_BrainBase):
         if not stream.sentences:
             return stream.emotion, ""
         return stream.emotion, stream
+
+    @staticmethod
+    def _log_stats(part, t_first):
+        """Ollama のくわしい時間（どこが遅いかを見る用）。"""
+        ns = 1e9
+        print(f"[時間] Ollama: 最初の文字まで {t_first or 0:.1f}秒"
+              f" / 読みこみ {part.get('load_duration', 0) / ns:.1f}秒"
+              f" / 指示 {part.get('prompt_eval_count', 0)}トークン {part.get('prompt_eval_duration', 0) / ns:.1f}秒"
+              f" / 作る {part.get('eval_count', 0)}トークン {part.get('eval_duration', 0) / ns:.1f}秒")
 
     def warm_up(self):
         """モデルを Mac のメモリに読みこんでおく（読みこみに4秒ほどかかるので、話しかけられる前に）。"""
@@ -1028,6 +1047,53 @@ class Ears:
     BACKLOG = 30        # 処理が追いつかず、たまった音がこれ以上なら古い音を捨てる（3秒ぶん）
     HEARTBEAT = 300.0   # この秒数ごとに「耳は動いている」とログに出す
 
+    capture_cmd = None   # 例 ["arecord", ...]。あれば録音を別のプログラムにまかせる（下の _capture）
+    overflows = 0        # 録音で音を取りこぼした回数（ログ用）
+
+    @contextlib.contextmanager
+    def _capture(self):
+        """マイクの音を on_audio に流しつづける。
+
+        capture_cmd があれば arecord などの別プログラムで録音し、パイプで受けとる。
+        Pi 4 では画面の描画で Python が忙しく、sounddevice の録音がまにあわずに音が欠け、
+        声が声らしく聞こえなくなっていた（VAD も Whisper も空になる）。別プログラムなら、
+        Python が少し遅れても音はパイプにたまり、欠けない。"""
+        if self.capture_cmd:
+            proc = subprocess.Popen(self.capture_cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL)
+            try:
+                import fcntl
+                fcntl.fcntl(proc.stdout.fileno(), 1031, 1 << 20)  # F_SETPIPE_SZ: 1MB（約30秒ぶん）
+            except Exception:
+                pass
+            block = int(self.rate * 0.1) * 2
+
+            def reader():
+                while True:
+                    data = proc.stdout.read(block)
+                    if not data:
+                        break
+                    self.on_audio(data)
+
+            threading.Thread(target=reader, daemon=True).start()
+            try:
+                yield
+            finally:
+                proc.kill()
+                proc.wait()
+            return
+        import sounddevice as sd
+
+        def callback(indata, frames, t, status):
+            if status and status.input_overflow:
+                self.overflows += 1
+            self.on_audio(bytes(indata))
+
+        with sd.RawInputStream(samplerate=self.rate, blocksize=int(self.rate * 0.1),
+                               device=self.device, dtype="int16", channels=1,
+                               callback=callback, latency="high"):
+            yield
+
     def listen(self):
         """発話ごとに文字を返すジェネレーター。
 
@@ -1036,17 +1102,10 @@ class Ears:
         - 処理がおくれて音がたまったら、古い音を捨てて今の音から聞く
         - ときどき、耳が動いていることと、たまっている音の数をログに出す
         """
-        import sounddevice as sd
-
-        def callback(indata, frames, t, status):
-            self.on_audio(bytes(indata))
-
         last_beat = time.monotonic()
         while True:
             try:
-                with sd.RawInputStream(samplerate=self.rate, blocksize=int(self.rate * 0.1),
-                                       device=self.device, dtype="int16", channels=1,
-                                       callback=callback):
+                with self._capture():
                     while True:
                         try:
                             item = self.q.get(timeout=self.STALL)
@@ -1074,6 +1133,9 @@ class Ears:
                             if self.segmenter and hasattr(self.segmenter, "stats"):
                                 prob, level = self.segmenter.stats()
                                 extra = f"、声らしさ 最大 {prob:.2f}・音の大きさ 最大 {level:.2f}"
+                            if self.overflows:
+                                extra += f"、音の取りこぼし {self.overflows} 回"
+                                self.overflows = 0
                             print(f"[耳] 聞いています（たまった音 {backlog}{extra}）")
                         text = self.process(item)
                         if text:

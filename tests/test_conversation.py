@@ -551,3 +551,20 @@ def test_conversation_speaks_while_thinking(monkeypatch):
     assert names[:3] == ["ack", "heard", "think"]
     assert "compose" in names and ("sign", "yes") in events
     assert [v for e, v in events if e == "caption"] == ["うん！", "うん！ いいよ。"]
+
+
+def test_capture_with_external_recorder():
+    """録音を別プログラム（arecord など）にまかせても、音が on_audio に届く。"""
+    import sys
+    import time as _t
+    ears = cv.Ears(None, recognizer=object())
+    ears.rate = 16000
+    got = []
+    ears.on_audio = lambda data: got.append(len(data))
+    ears.capture_cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes(32000))"]
+    with ears._capture():
+        for _ in range(50):
+            if sum(got) >= 32000:
+                break
+            _t.sleep(0.05)
+    assert sum(got) == 32000 and max(got) == 3200
