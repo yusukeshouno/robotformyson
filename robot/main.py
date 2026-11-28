@@ -11,6 +11,7 @@
 """
 import argparse
 import os
+import shutil
 import socket
 import sys
 import time
@@ -186,6 +187,13 @@ def start_conversation(args, tracker, last_face, growth=None, faces=None, memory
         if not args.no_vad:  # 話しはじめ・終わりは Silero VAD で（小さな声に強い）
             from .vad import Segmenter
             ears.segmenter = Segmenter.create(ears.rate)
+        # 録音は arecord にまかせる（Python が描画で忙しくても音が欠けない）。ROBOT_MIC_CMD=sounddevice で前のやり方
+        mic_cmd = os.environ.get("ROBOT_MIC_CMD", "arecord")
+        mic_name = (args.mic or os.environ.get("ROBOT_MIC") or "").lower()
+        if mic_cmd == "arecord" and shutil.which("arecord") and mic_name in ("", "pulse", "default"):
+            ears.capture_cmd = ["arecord", "-q", "-D", mic_name or "default", "-f", "S16_LE",
+                                "-r", str(ears.rate), "-c", "1", "-t", "raw", "--buffer-time=1000000"]
+            print(f"録音: arecord（{mic_name or 'default'}、{ears.rate}Hz）")
         # 「イモ」と名前だけ呼ばれたとき、Whisper は空にしがち。Vosk に名前だけを見張らせる
         ears.spot_name(cv.spot_words(args.name))
         print(f"聞き取り: {'Whisper（' + whisper + '）、つながらないときは Vosk' if whisper else 'Vosk'}"
