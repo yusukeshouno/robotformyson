@@ -1,3 +1,4 @@
+import time
 """顔をおぼえる機能のテスト（カメラ・モデルがなくても動く）。
 
 本物の顔の代わりに、FakeEmbedder が「画像に写っている人の番号」から決まった特徴を返す。
@@ -436,3 +437,99 @@ def test_main_start_faces_without_camera_or_models(tmp_path, monkeypatch):
 def test_real_models_load_and_find_no_face_in_blank_image():
     e = fc.Embedder()
     assert e.faces(np.zeros((480, 640, 3), np.uint8)) == []
+
+
+def test_old_opencv_uses_2022mar_model():
+    """Pi の OpenCV 4.6 は 2023mar を読めない（Layer id=-1 not found）ので 2022mar を使う。"""
+    assert fc.yunet_for("4.6.0") == "face_detection_yunet_2022mar.onnx"
+    assert fc.yunet_for("4.7.0") == "face_detection_yunet_2022mar.onnx"
+    assert fc.yunet_for("4.8.0") == "face_detection_yunet_2023mar.onnx"
+    assert fc.yunet_for("4.10.0") == "face_detection_yunet_2023mar.onnx"
+    assert fc.yunet_for("5.0.0-pre") == "face_detection_yunet_2023mar.onnx"
+
+
+def test_detector_keeps_image_size_and_scales_back():
+    """黒でうめると、ない顔を見つけてしまう（実機で 320x256 にしたら誤検出）ので、そのまま渡す。"""
+    import cv2
+    import numpy as np
+
+    sizes = []
+
+    class Det:
+        def setInputSize(self, size):
+            sizes.append(size)
+
+        def detect(self, img):
+            assert (img.shape[1], img.shape[0]) == sizes[-1]
+            f = np.zeros((1, 15), np.float32)
+            f[0, :4] = (10, 20, 30, 40)
+            return 1, f
+
+    e = object.__new__(fc.Embedder)
+    e.cv2, e.detector, e.detect_width = cv2, Det(), 320
+    found = e.faces(np.zeros((480, 640, 3), np.uint8))
+    assert sizes == [(320, 240)]
+    assert list(found[0][:4]) == [20, 40, 60, 80]   # 元の画像の座標に戻っている
+
+
+def test_enroll_dialog_shows_progress_while_capturing():
+    import threading as th
+
+    class Rec:
+        def __init__(self):
+            self.done, self.n = th.Event(), 0
+
+        def enroll(self, name):
+            def run():
+                for i in range(1, 4):
+                    time.sleep(0.35)
+                    self.n = i
+                self.done.set()
+            th.Thread(target=run, daemon=True).start()
+            return self.done
+
+        def enroll_progress(self):
+            return None if self.done.is_set() else (self.n, 3)
+
+        def enroll_result(self):
+            return ("ok", "p1")
+
+    shown, said = [], []
+    d = fc.EnrollDialog(Rec(), show=shown.append)
+    d.name = "ゆうと"
+    d._capture(lambda emo, text: said.append(text))
+    assert shown[0] == "ゆうと、カメラを みてね ○○○"
+    assert any("●○○" in s for s in shown)
+    assert said[-1] == "おぼえたよ！ よろしくね、ゆうと！"
+
+
+def test_enroll_dialog_restarts_and_gives_up_when_unclear():
+    said = []
+    speak = lambda emo, text: said.append(text)  # noqa: E731
+    d = fc.EnrollDialog(object())
+    assert d.handle("イモ、かおを おぼえて", speak)
+    assert d.handle("顔を覚えて", speak)          # 名前とまちがえない
+    assert d.state == "name" and said[-1] == "いいよ！ おなまえ おしえて？"
+    d.on_unclear(speak)
+    d.on_unclear(speak)
+    assert d.active and said[-1].startswith("ん？")
+    d.on_unclear(speak)                            # 3回聞き取れなければ、やめる
+    assert not d.active and "また あとで" in said[-1]
+
+
+def test_confirm_accepts_name_and_rename():
+    out = []
+    d = fc.EnrollDialog(object())
+    d.state, d.name, d.last = "confirm", "青", d.clock()
+    d._capture = lambda speak: out.append("CAP")
+    speak = lambda e, t: out.append(t)
+    d.handle("ひらがなであお", speak)      # 言いなおし → 新しい名前で聞きなおす
+    assert d.name == "あお" and out[-1] == "あお、で あってる？"
+    d.handle("さらにして", speak)          # 関係ない言葉は名前にしない
+    assert d.name == "あお"
+    d.handle("あおだよ", speak)            # 名前をくりかえしたら「うん」と同じ
+    assert out[-1] == "CAP"
+
+
+def test_extract_name_ignores_punctuation():
+    assert fc.extract_name("ちがうよ、けんた") == "けんた"

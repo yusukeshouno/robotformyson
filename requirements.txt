@@ -5,3 +5,4 @@ numpy
 anthropic>=2.8  # --brain claude のときだけ必要
 vosk
 sounddevice
+onnxruntime      # 話の区切り（Silero VAD）。なくても動く

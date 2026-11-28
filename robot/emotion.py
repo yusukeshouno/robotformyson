@@ -5,7 +5,8 @@ from collections import deque
 
 
 class EmotionEngine:
-    SLEEP_AFTER = 40.0   # 誰もいない状態がこの秒数続くと眠る
+    SLEEP_AFTER = 120.0  # 顔も見えず、話しかけられもしない状態がこの秒数続くと眠る（起きるのは「イモ」と呼ばれたとき）
+    QUIET_SLEEP_AFTER = 300.0  # 顔が見えていても、だれも話しかけない状態がこの秒数続くと眠る
     LOVE_EVERY = 20.0    # 見つめられ続けると時々ハート目
     # 返事の気持ちの「余韻」。話し終えたあとも少しのあいだ顔に残り、ゆっくり消える。
     # 悲しい・怒りは子どもを引き止めないよう、短く・弱く残す。
@@ -21,6 +22,7 @@ class EmotionEngine:
         self.present = False
         self.present_since = now
         self.last_activity = now    # 最後に人の気配があった時刻
+        self.last_talk = now        # 最後に話しかけられた時刻
         self.last_love = now
         self.sleeping = False
         self.taps = deque()
@@ -54,6 +56,7 @@ class EmotionEngine:
     def notice(self, now):
         """声をかけられたなど、人の気配があったとき。眠っていれば起きる。"""
         self.last_activity = now
+        self.last_talk = now
         return self._wake(now)
 
     def _wake(self, now):
@@ -73,6 +76,9 @@ class EmotionEngine:
         if present == self.present:
             return
         self.present = present
+        if self.sleeping:                # 眠っているあいだは、顔が見えても起きない（「イモ」で起きる）
+            self.present_since = now
+            return
         if present:
             self.present_since = now
             if not self._wake(now):
@@ -116,6 +122,11 @@ class EmotionEngine:
         if self.current:
             return self.current
 
+        if self.sleeping:
+            return "sleepy"
+        if self.QUIET_SLEEP_AFTER and now - self.last_talk > self.QUIET_SLEEP_AFTER:
+            self.sleeping = True     # 顔は見えていても、しばらく話しかけられなければ眠る
+            return "sleepy"
         if self.present:
             if now - self.last_love > self.LOVE_EVERY and now - self.present_since > 10:
                 self.last_love = now

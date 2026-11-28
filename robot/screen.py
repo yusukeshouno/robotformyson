@@ -58,6 +58,14 @@ class DotScreen:
         surf.blit(self.grid, (0, 0))
 
 
+    def draw_image(self, surf, img):
+        """顔の代わりに、(rows, 48, 3) のドット絵をそのまま出す（お絵かきを見せるとき）。"""
+        full = np.clip(img, 0, 255).astype(np.uint8)
+        pygame.surfarray.blit_array(self.lo, full.swapaxes(0, 1))
+        pygame.transform.scale(self.lo, self.size, surf)
+        surf.blit(self.grid, (0, 0))
+
+
 def face_dim(n=N):
     """顔のうしろの模様の明るさ（行ごと）。目と口のあたりは弱く、顔のふちは強く。"""
     y = np.arange(n) + 0.5

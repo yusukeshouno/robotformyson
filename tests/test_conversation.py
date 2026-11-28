@@ -257,7 +257,7 @@ def test_conversation_flow(monkeypatch):
     assert conv.handle("これ みて") == ("joy", "やあ！")
     assert brain.calls == [("これ みて", b"jpeg")]
     assert voice.said == ["やあ！"] and ears.mutes == [True, False]
-    assert [e for e, _ in conv.poll()] == ["heard", "think", "joy", "joy"]
+    assert [e for e, _ in conv.poll()] == ["ack", "heard", "think", "joy", "caption", "joy"]
 
 
 def test_conversation_only_replies_when_attended_or_called():
@@ -322,3 +322,140 @@ def test_speaker_name_kept_when_only_personality_in_system():
     assert "ゆうくん" in conv._with_speaker("こんにちは")
     brain.speaker_in_system = True
     assert conv._with_speaker("こんにちは") == "こんにちは"
+
+
+def test_ears_keep_running_while_replying():
+    """返事を考えているあいだも耳は止まらない（前は音がたまって捨てられていた）。"""
+    import threading
+    import time as _t
+    from robot.conversation import Conversation
+    gate = threading.Event()
+    listened = []
+
+    class Ears:
+        def listen(self):
+            for t in ("イモ ひとつめ", "イモ ふたつめ"):
+                listened.append(t)
+                yield t
+            gate.wait(2)
+
+    c = Conversation(brain=None, ears=Ears())
+    handled = []
+    c.handle = lambda t: (handled.append(t), _t.sleep(0.5))
+    c.start()
+    _t.sleep(0.2)
+    assert listened == ["イモ ひとつめ", "イモ ふたつめ"]  # 1つめの返事の途中でも2つめを聞けた
+    gate.set()
+
+
+def test_voicevox_voice_and_fallback(monkeypatch):
+    import numpy as np
+    import io as _io
+    import wave as _wave
+    buf = _io.BytesIO()
+    with _wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+        w.writeframes(np.zeros(2400, np.int16).tobytes())
+    calls = []
+
+    def post(self, path, params, body=None, timeout=10):
+        calls.append((path, params))
+        if path == "/audio_query":
+            return b'{"speedScale": 1, "pitchScale": 0}'
+        return buf.getvalue()
+
+    monkeypatch.setattr(cv.VoicevoxVoice, "_post", post)
+    v = cv.VoicevoxVoice("http://mac:50021", speaker=3, play=False)
+    data, rate = v.synth("こんにちは")
+    assert rate == 24000 and len(data) == 2400
+    assert calls[0] == ("/audio_query", {"text": "こんにちは", "speaker": 3})
+
+    class JTalk:
+        def synth(self, text):
+            return np.ones(10, np.int16), 48000
+
+    def down(self, *a, **k):
+        raise OSError("no route")
+
+    monkeypatch.setattr(cv.VoicevoxVoice, "_post", down)
+    v = cv.VoicevoxVoice("http://mac:50021", fallback=JTalk(), play=False)
+    assert v.synth("やあ")[1] == 48000          # つながらなければ Open JTalk
+    assert v.synth("やあ")[1] == 48000          # しばらくは VOICEVOX を試さない
+
+
+def test_fix_name_accent():
+    q = {"accent_phrases": [
+        {"moras": [{"text": "イ"}, {"text": "モ"}, {"text": "ダ"}, {"text": "ヨ"}], "accent": 2},
+        {"moras": [{"text": "イ"}, {"text": "ヌ"}], "accent": 2}]}
+    cv.fix_name_accent(q, "イモ")
+    assert q["accent_phrases"][0]["accent"] == 1   # イ↘モだよ
+    assert q["accent_phrases"][1]["accent"] == 2   # ほかの言葉はそのまま
+
+
+def test_name_only_call_spotted_when_whisper_empty():
+    """「イモ」だけだと Whisper は空にしがち。Vosk の名前見張りが聞いていれば呼ばれたことにする。"""
+    import json as _json
+    import numpy as np
+
+    class Rec:
+        def __init__(self, text=""):
+            self.text = text
+        def AcceptWaveform(self, c):
+            return False
+        def Result(self):
+            return '{"text": ""}'
+        def FinalResult(self):
+            return _json.dumps({"text": self.text}, ensure_ascii=False)
+        def Reset(self):
+            pass
+
+    class Seg:
+        speaking = False
+        buf = []
+        def __init__(self):
+            self.n = 0
+        def feed(self, pcm):
+            self.n += 1
+            if self.n == 1:
+                self.speaking = True
+                self.buf = [pcm]
+                return None
+            self.speaking = False
+            return b"\0" * 16000 * 2   # 1秒の発話
+        def reset(self):
+            pass
+
+    ears = cv.Ears(None, recognizer=Rec(), transcriber=lambda a, r: "")
+    ears.segmenter = Seg()
+    ears.spot_name(cv.spot_words("イモ"), recognizer=Rec("芋"))
+    pcm = np.zeros(1600, np.int16).tobytes()
+    ep = ears.gate.epoch
+    assert ears.process((ep, pcm)) is None
+    assert ears.process((ep, pcm)) == "芋"
+
+
+def test_asleep_only_wakes_on_name():
+    c = cv.Conversation(brain=None, wake_words=("イモ",), is_attended=lambda: True)
+    c.is_sleeping = lambda: True
+    assert not c.should_reply("ボールは3種類")      # 顔が見えていても、眠っていたら返事しない
+    assert c.should_reply("芋")                      # 名前を呼ばれたら起きる
+    assert not c._expecting()
+    c.is_sleeping = lambda: False
+    assert c.should_reply("ボールは3種類")
+
+
+def test_capture_with_external_recorder():
+    """録音を別プログラム（arecord など）にまかせても、音が on_audio に届く。"""
+    import sys
+    import time as _t
+    ears = cv.Ears(None, recognizer=object())
+    ears.rate = 16000
+    got = []
+    ears.on_audio = lambda data: got.append(len(data))
+    ears.capture_cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes(32000))"]
+    with ears._capture():
+        for _ in range(50):
+            if sum(got) >= 32000:
+                break
+            _t.sleep(0.05)
+    assert sum(got) == 32000 and max(got) == 3200

@@ -34,7 +34,13 @@ import numpy as np
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 _ZOO = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/"
+# 古い OpenCV（4.8 より前。Pi OS Bookworm は 4.6）は 2023mar を読めないので、消される前の 2022mar を使う。
+_ZOO_2022 = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
+             "7e062e54cf5410c09b795ff71b4a255e58498c79/models/")
 MODELS = {  # ファイル名: (取ってくる場所, sha256)
+    "face_detection_yunet_2022mar.onnx": (
+        _ZOO_2022 + "face_detection_yunet/face_detection_yunet_2022mar.onnx",
+        "50ef07f702a31741ca46a4c0d947773b64143b9362780237bf0d427d6c79bab7"),
     "face_detection_yunet_2023mar.onnx": (
         _ZOO + "face_detection_yunet/face_detection_yunet_2023mar.onnx",
         "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"),
@@ -42,7 +48,16 @@ MODELS = {  # ファイル名: (取ってくる場所, sha256)
         _ZOO + "face_recognition_sface/face_recognition_sface_2021dec.onnx",
         "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"),
 }
-YUNET, SFACE = list(MODELS)
+YUNET_OLD, YUNET, SFACE = list(MODELS)
+
+
+def yunet_for(cv2_version):
+    """この OpenCV で動く顔検出モデルの名前。4.8 より前なら古い 2022mar。"""
+    try:
+        major, minor = (int(x) for x in cv2_version.split(".")[:2])
+    except ValueError:
+        return YUNET
+    return YUNET_OLD if (major, minor) < (4, 8) else YUNET
 
 MATCH = 0.40        # これ以上似ていたら同じ人（SFace のコサイン類似度。OpenCV の目安は 0.363）
 SAME_AS_OTHER = 0.50  # 登録しようとした顔が、別の人にこれ以上似ていたら登録しない
@@ -155,7 +170,7 @@ class Embedder:
 
     def __init__(self, model_dir=MODEL_DIR, detect_width=320):
         import cv2
-        paths = [os.path.join(model_dir, n) for n in (YUNET, SFACE)]
+        paths = [os.path.join(model_dir, n) for n in (yunet_for(cv2.__version__), SFACE)]
         for p in paths:
             if not os.path.exists(p):
                 raise RuntimeError(f"顔を見分けるモデルがありません: {p}"
@@ -415,7 +430,8 @@ _ENROLL_FACE = ("かお", "顔")
 _ENROLL_REMEMBER = ("おぼえ", "覚え", "とうろく", "登録")
 _YES = ("うん", "はい", "いいよ", "そう", "あってる", "あたり", "おっけー", "ok")
 _NO = ("ちがう", "違う", "いいえ", "ううん", "だめ", "ちゃう")
-_NAME_PREFIX = re.compile(r"^(えっと|えーと|あのね|ぼくの|わたしの|おれの|うちの)?"
+_NAME_PREFIX = re.compile(r"^(ちがうよ|ちがう|違う|ううん)?(ひらがなで|カタカナで|かたかなで)?"
+                          r"(えっと|えーと|あのね|ぼくの|わたしの|おれの|うちの)?"
                           r"(なまえは|名前は|ぼくは|わたしは|おれは|僕は|私は|俺は)?")
 _NAME_SUFFIX = re.compile(r"(っていうの|っていうよ|っていいます|といいます|です|だよ|だ|よ|ね|)$")
 
@@ -437,7 +453,7 @@ def is_no(text):
 
 def extract_name(text):
     """「ぼくは ゆうと だよ」→「ゆうと」。名前らしくなければ None。"""
-    t = unicodedata.normalize("NFKC", text).replace(" ", "").replace("　", "")
+    t = re.sub(r"[\s、。,.!?！？]", "", unicodedata.normalize("NFKC", text))
     t = _NAME_PREFIX.sub("", t)
     t = _NAME_SUFFIX.sub("", t)
     if not t or len(t) > 8 or not re.fullmatch(r"[ぁ-んァ-ヶー一-龯a-zA-Z]+", t):
@@ -445,6 +461,7 @@ def extract_name(text):
     return t
 
 
+_RENAME = re.compile(r"ちがう|違う|ううん|ひらがな|カタカナ|かたかな|なまえは|名前は")  # 名前を言いなおしている合図
 _CANCEL = ("やめる", "やめて", "やっぱりいい", "おしまい", "ストップ")
 
 
@@ -460,10 +477,13 @@ class EnrollDialog:
     """
 
     TIMEOUT = 40.0   # この秒数だまっていたら、やりとりをやめる
+    MAX_UNCLEAR = 3  # 聞き取れないのがこの回数つづいたら、やめる
 
-    def __init__(self, recognizer, clock=time.monotonic):
+    def __init__(self, recognizer, clock=time.monotonic, show=None):
         self.rec, self.clock = recognizer, clock
+        self.show = show   # show(字幕)。撮っている途中の進み具合を画面に出す（スピーカーがなくても分かる）
         self.state, self.name, self.tries, self.last = None, None, 0, 0.0
+        self.unclear = 0
 
     @property
     def active(self):
@@ -472,6 +492,7 @@ class EnrollDialog:
         return self.state is not None
 
     def handle(self, text, speak):
+        self.unclear = 0
         if not self.active:
             if not wants_enroll(text):
                 return False
@@ -479,20 +500,42 @@ class EnrollDialog:
             speak("excited", "いいよ！ おなまえ おしえて？")
             return True
         self.last = self.clock()
+        if wants_enroll(text):  # もう一度「かおを おぼえて」: 名前とまちがえず、はじめから
+            self._go("name")
+            self.tries = 0
+            speak("excited", "いいよ！ おなまえ おしえて？")
+            return True
         if any(_key(w) in _key(text) for w in _CANCEL):
             self.state = None
             speak("neutral", "わかった、また こんどね。")
         elif self.state == "name":
             self._on_name(text, speak)
         elif self.state == "confirm":
-            if is_yes(text):
+            other = extract_name(text) if _RENAME.search(text) else None
+            if is_yes(text) or (self.name and _key(self.name) in _key(text)):  # 「あおだよ」も「うん」
                 self._capture(speak)
+            elif is_no(text) and other is None:
+                self._go("name")
+                speak("confused", "ごめんね。もういっかい おなまえ いって？")
+            elif other and not is_no(other):  # 「ちがう、あお」「ひらがなで あお」: 言いなおした名前で聞きなおす
+                self.name = other
+                speak("joy", f"{other}、で あってる？")
             elif is_no(text):
                 self._go("name")
                 speak("confused", "ごめんね。もういっかい おなまえ いって？")
             else:
                 speak("neutral", f"{self.name}、で あってたら「うん」って いってね。")
         return True
+
+    def on_unclear(self, speak):
+        """声はしたが聞き取れなかった。何回か聞きなおし、だめならやめる。"""
+        self.unclear += 1
+        if self.unclear >= self.MAX_UNCLEAR:
+            self.state, self.unclear = None, 0
+            speak("sad", "ごめんね、うまく きこえなかった。また あとで やろうね。")
+        else:
+            self.last = self.clock()
+            speak("confused", "ん？ きこえなかった。もういっかい いって？")
 
     def _go(self, state):
         if state == "name" and self.state != "name":
@@ -513,11 +556,24 @@ class EnrollDialog:
         self._go("confirm")
         speak("joy", f"{name}、で あってる？")
 
+    def _wait_with_progress(self, name, done):
+        """撮りおわるまで待つ。そのあいだ「カメラを みてね ●●○○○」を出す。"""
+        progress = getattr(self.rec, "enroll_progress", None)
+        if self.show is None or progress is None or done is None:
+            return self.rec.wait_enroll() or ("noface", None)
+        shown, until = None, time.monotonic() + 15
+        while not done.wait(0.3) and time.monotonic() < until:
+            p = progress()
+            if p and p != shown:
+                shown = p
+                self.show(f"{name}、カメラを みてね {'●' * p[0]}{'○' * (p[1] - p[0])}")
+        return self.rec.enroll_result() or ("noface", None)
+
     def _capture(self, speak):
         name, self.state = self.name, None
         speak("excited", f"{name}、カメラを みて にっこりしてね！")
-        self.rec.enroll(name)
-        result = self.rec.wait_enroll() or ("noface", None)
+        done = self.rec.enroll(name)
+        result = self._wait_with_progress(name, done)
         if result[0] == "ok":
             speak("love", f"おぼえたよ！ よろしくね、{name}！")
         elif result[0] == "other":
