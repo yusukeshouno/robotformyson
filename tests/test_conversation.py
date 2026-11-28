@@ -96,6 +96,15 @@ class FakeOllama:
                 outer.requests.append((self.path, body))
                 if self.path == "/api/show":
                     self._send({"capabilities": outer.caps})
+                elif body.get("stream"):   # 本物と同じく、少しずつ（1行に1つの JSON）返す
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-ndjson")
+                    self.end_headers()
+                    r = outer.reply
+                    for i in range(0, len(r), 3):
+                        part = {"message": {"role": "assistant", "content": r[i:i + 3]}, "done": False}
+                        self.wfile.write(json.dumps(part).encode() + b"\n")
+                    self.wfile.write(json.dumps({"message": {"content": ""}, "done": True}).encode() + b"\n")
                 else:
                     self._send({"message": {"role": "assistant", "content": outer.reply}})
 
@@ -444,6 +453,106 @@ def test_asleep_only_wakes_on_name():
     assert c.should_reply("ボールは3種類")
 
 
+# ---------------------------------------------------------------- 作りながら話す
+def _stream_all(text, step=2, **kw):
+    st = cv.SentenceStream(**kw)
+    got = []
+    for i in range(0, len(text), step):
+        got += st.feed(text[i:i + step])
+    return st, got + st.finish()
+
+
+def test_sentence_stream_gives_sentences_one_by_one():
+    st, got = _stream_all("[excited] {目:star 口:laugh} すごい！ きょうりゅう だいすき！ もっと おしえて。")
+    assert st.emotion == "excited" and st.spec == {"eyes": "star", "mouth": "laugh"}
+    assert [g.strip() for g in got] == ["すごい！", "きょうりゅう だいすき！"]   # 2文まで
+    assert st.done and st.text == "すごい！ きょうりゅう だいすき！"
+
+
+def test_sentence_stream_waits_for_face_parts_and_next_char():
+    st = cv.SentenceStream()
+    assert st.feed("[joy] ") == []
+    assert st.feed("{目:happy") == []          # 顔の部品の途中
+    assert st.feed("} やあ！") == []            # 「！？」と続くかもしれない
+    assert st.feed("？ げんき") == ["やあ！？"]
+    assert st.finish() == [" げんき"]
+
+
+def test_sentence_stream_without_tag_or_parts():
+    st, got = _stream_all("こんにちは。", face_parts=False)
+    assert st.emotion == "neutral" and got == ["こんにちは。"]
+
+
+def test_sentence_stream_matches_shorten():
+    for raw in ["[joy] いち。に。さん。", "[joy] " + "あ" * 100, "[sad] ながい ぶん、" * 6 + "おわり。"]:
+        st, _ = _stream_all(raw, step=3)
+        assert st.text == cv.shorten(cv.clean_for_speech(cv.parse_reply(raw)[1]))
+
+
+def test_sentence_stream_stops_unsafe():
+    st, got = _stream_all("[joy] こんにちは。しね。")
+    assert [g.strip() for g in got] == ["こんにちは。"] and st.unsafe
+
+
+def test_ollama_streams_sentences():
+    srv = FakeOllama(reply="[joy] {目:happy 口:smile} やあ！ あそぼう。 もう一回。")
+    try:
+        brain = cv.make_brain("ollama", "m", ollama_url=srv.url)
+        got = []
+        emotion, answer = brain.reply("ねえ", on_sentence=lambda e, spec, t: got.append((e, t.strip())))
+        assert got == [("joy", "やあ！"), ("joy", "あそぼう。")]
+        assert (emotion, answer) == ("joy", "やあ！ あそぼう。") and brain.streamed
+        assert brain.last_face == {"eyes": "happy", "mouth": "smile"}
+        body = srv.requests[-1][1]
+        assert body["stream"] is True and body["keep_alive"] == cv.KEEP_ALIVE
+    finally:
+        srv.close()
+
+
+def test_ollama_stream_unsafe_first_sentence_is_replaced():
+    srv = FakeOllama(reply="[angry] しね。")
+    try:
+        brain = cv.make_brain("ollama", "m", ollama_url=srv.url)
+        got = []
+        assert brain.reply("ねえ", on_sentence=lambda *a: got.append(a)) == cv.SAFE_REPLY
+        assert got == []
+    finally:
+        srv.close()
+
+
+class ClipVoice(FakeVoice):
+    def synth(self, text):
+        return text, 16000
+
+    def play_audio(self, data, rate):
+        self.said.append(data)
+
+
+class StreamBrain:
+    vision = False
+    face_parts = True
+
+    def reply(self, text, image=None, on_sentence=None):
+        on_sentence("joy", {"eyes": "star"}, "うん！")
+        on_sentence("joy", {"eyes": "star"}, " いいよ。")
+        self.last_face = {"eyes": "star"}
+        return "joy", "うん！ いいよ。"
+
+
+def test_conversation_speaks_while_thinking(monkeypatch):
+    monkeypatch.setattr(cv.time, "sleep", lambda s: None)
+    voice, ears = ClipVoice(), FakeEars()
+    conv = cv.Conversation(StreamBrain(), voice, ears)
+    assert conv.handle("あそぼう") == ("joy", "うん！ いいよ。")
+    assert voice.said == ["うん！", "いいよ。"]
+    assert ears.mutes == [True, False]            # 文と文のあいだもマイクは閉じたまま
+    events = conv.poll()
+    names = [e for e, _ in events]
+    assert names[:3] == ["ack", "heard", "think"]
+    assert "compose" in names and ("sign", "yes") in events
+    assert [v for e, v in events if e == "caption"] == ["うん！", "うん！ いいよ。"]
+
+
 def test_capture_with_external_recorder():
     """録音を別プログラム（arecord など）にまかせても、音が on_audio に届く。"""
     import sys
@@ -459,3 +568,28 @@ def test_capture_with_external_recorder():
                 break
             _t.sleep(0.05)
     assert sum(got) == 32000 and max(got) == 3200
+
+
+def test_sentence_stream_face_parts_after_sentences():
+    st = cv.SentenceStream()
+    got = []
+    for ch in ["[joy] ", "やあ！", " あそぼう。", " {目:happy", " 口:smile}"]:
+        got += st.feed(ch)
+    assert [g.strip() for g in got] == ["やあ！", "あそぼう。"]
+    assert st.done and st.spec == {"eyes": "happy", "mouth": "smile"} and st.spec_late
+    assert st.finished
+
+
+def test_ollama_late_face_parts_reach_conversation(monkeypatch):
+    monkeypatch.setattr(cv.time, "sleep", lambda s: None)
+    srv = FakeOllama(reply="[joy] うん！ いいよ。 {目:star 口:laugh}")
+    try:
+        brain = cv.make_brain("ollama", "m", ollama_url=srv.url)
+        voice, ears = ClipVoice(), FakeEars()
+        conv = cv.Conversation(brain, voice, ears)
+        assert conv.handle("あそぼう") == ("joy", "うん！ いいよ。")
+        assert voice.said == ["うん！", "いいよ。"]
+        assert "compose" in [e for e, _ in conv.poll()]
+        assert brain.history[-1]["content"].startswith("[joy] うん！ いいよ。 {")
+    finally:
+        srv.close()

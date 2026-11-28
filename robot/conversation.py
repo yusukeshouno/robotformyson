@@ -39,6 +39,8 @@ from .memory import wants_forget
 DEFAULT_MODEL = "claude-opus-5-5"            # Claude を使うとき
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "gemma4:12b"                   # Mac mini など（画像も見られる）
+# モデルをメモリに置いておく時間。外れると次の返事で読みこみに4秒ほどかかる（Mac mini はメモリ32GB、gemma4:12b は約8GB）
+KEEP_ALIVE = os.environ.get("ROBOT_OLLAMA_KEEP_ALIVE", "24h")
 DEFAULT_VOSK = os.path.join(os.path.dirname(__file__), "..", "models", "vosk-model-small-ja-0.22")
 REPLY_EMOTIONS = ("neutral", "joy", "sad", "angry", "surprise", "love",
                   "laugh", "shy", "excited", "confused")
@@ -62,6 +64,7 @@ LOOK_WORDS = ("これ", "それ", "見て", "みて", "見える", "みえる", 
 # [joy] のような感情タグ。小さなモデルは全角の［］【】や大文字で書くこともある
 _TAG_RE = re.compile(r"[\[［【]\s*([A-Za-z]+)\s*[\]］】]")
 _THINK_RE = re.compile(r"<think>.*?(</think>|$)", re.S)
+_SPEC_RE_ANY = re.compile(r"[{｛][^{}｛｝]*[}｝]")
 _SENTENCE_RE = re.compile(r"[^。！？!?]*[。！？!?]+|[^。！？!?]+$")
 MAX_SENTENCES = 2   # 声に出すのは最初の2文まで（長い返事は子どもが飽きてしまう）
 MAX_CHARS = 80
@@ -147,6 +150,119 @@ def parse_reply(text):
     return emotion, _TAG_RE.sub("", text).strip()
 
 
+
+class SentenceStream:
+    """AI の返事を少しずつ受けとり、読み上げられる文が1つできるたびに返す。
+
+    返事を全部作り終えるのを待たずに、1文目から話しはじめるため（Mac mini の gemma4:12b は
+    1秒に20トークンほどなので、顔の部品の指定と2文を作り終えるまで数秒かかっていた）。
+    先頭の感情タグ・顔の部品の指定 {…} がそろってから、文を返しはじめる。
+    文の数・長さの決まりは shorten() と同じ。
+    """
+
+    def __init__(self, face_parts=True, max_sentences=MAX_SENTENCES, max_chars=MAX_CHARS):
+        self.face_parts = face_parts
+        self.max_sentences, self.max_chars = max_sentences, max_chars
+        self.raw = ""
+        self.emotion, self.spec = "neutral", None
+        self.head = False      # 感情タグと顔の部品を読みおえたか
+        self.sentences = []    # もう返した文
+        self.done = False      # 決まりの長さに達した（もう話さない）
+        self.unsafe = False
+        self.spec_late = False  # 顔の部品が、話しはじめたあとに届いた
+        self.spec_after = False # 顔の部品が文のあとに書かれていた
+
+    def _split_head(self, text, final):
+        """(本文 または None（まだ待つ）)。"""
+        text = text.lstrip()
+        m = _TAG_RE.match(text)
+        if m:
+            if m.group(1).lower() in REPLY_EMOTIONS:
+                self.emotion = m.group(1).lower()
+            text = text[m.end():].lstrip()
+        elif text[:1] in "[［【" and not final and len(text) < 16:
+            return None                       # タグの途中
+        if self.face_parts:
+            if text[:1] in "{｛":
+                if not re.search(r"[}｝]", text):
+                    return None if not final else ""
+                spec, text = expression.parse(text)
+                self.spec = spec
+                text = text.lstrip()
+            elif not text and not final:
+                return None                   # 部品の指定がこれから来るかもしれない
+        return text
+
+    def feed(self, chunk, final=False):
+        """新しく読み上げられるようになった文のリスト。"""
+        self.raw += chunk
+        if self.done and (self.spec is not None or not self.face_parts):
+            return []
+        text = self.raw
+        if "<think>" in text and not re.search(r"</think>", text) and not final:
+            return []
+        text = _THINK_RE.sub("", text)
+        body = self._split_head(text, final)
+        if body is None:
+            return []
+        self.head = True
+        if self.face_parts and self.spec is None:   # 顔の部品は文のあと（最後）に来る
+            m = _SPEC_RE_ANY.search(body)
+            if m:
+                self.spec = expression.parse(m.group(0))[0]
+                self.spec_after = True               # 文のあとに書かれた: その前の文は言い終わっている
+                self.spec_late = bool(self.sentences)
+        if self.done:
+            return []
+        specs = list(_SPEC_RE_ANY.finditer(body))
+        spec_last = bool(specs) and not body[specs[-1].end():].strip()   # 本文が {…} で終わっている
+        body = _TAG_RE.sub("", _SPEC_RE_ANY.sub("", body))
+        tail = re.search(r"[{｛][^}｝]*$", body)
+        if tail:
+            body = body[:tail.start()]   # 部品の指定の途中（その前の文はもう言い終わっている）
+        body = clean_for_speech(body)
+        parts = _SENTENCE_RE.findall(body)
+        if not final and not (tail or (self.spec_after and spec_last)):
+            # 最後の文は、次の文字が来るまで待つ（文の途中か、「！？」と続くかもしれない）
+            parts = parts[:-1]
+        out = []
+        for s in parts[len(self.sentences):]:
+            if not s.strip():
+                continue
+            total = sum(len(x) for x in self.sentences)
+            if self.sentences and total + len(s) > self.max_chars:
+                self.done = True
+                break
+            if is_unsafe("".join(self.sentences) + s):
+                self.unsafe = self.done = True
+                break
+            if not self.sentences and len(s.strip()) > self.max_chars:
+                s = s.strip()[:self.max_chars].rstrip("、, ") + "…"
+                self.done = True
+            self.sentences.append(s)
+            out.append(s)
+            if len(self.sentences) >= self.max_sentences:
+                self.done = True
+            if self.done:
+                break
+        return out
+
+    def finish(self):
+        return self.feed("", final=True)
+
+    @property
+    def text(self):
+        return "".join(self.sentences).strip()
+
+    @property
+    def finished(self):
+        """もう受けとらなくてよいか（話す文がそろい、顔の部品も届いた）。"""
+        if not self.done:
+            return False
+        return (self.spec is not None or not self.face_parts or self.unsafe
+                or len(self.raw) > 400)
+
+
 # はい・いいえ。返事の始まりだけを見る（「いいよ」は はい、「いいえ」は いいえ）
 YES_STARTS = ("はい", "うん", "そうだよ", "そうそう", "そうなの", "そう！", "そう!", "そうだね",
               "いいよ", "いいね", "あたり", "せいかい", "正解", "もちろん", "ええ", "あってる", "できるよ")
@@ -192,30 +308,42 @@ class _BrainBase:
         self.face_parts = True  # 返事のたびに、顔の部品の組み合わせも考えてもらう
         self.last_face = None   # 直前の返事で AI が選んだ顔の部品（expression.parse の辞書）
 
-    def reply(self, text, image_jpeg=None):
-        """(感情, 返事) を返す。通信エラーでも例外にせず、謝る返事を返す。"""
+    def reply(self, text, image_jpeg=None, on_sentence=None):
+        """(感情, 返事) を返す。通信エラーでも例外にせず、謝る返事を返す。
+
+        on_sentence(感情, 顔の部品, 文) を渡すと、返事を作りながら、読み上げられる文が
+        できるたびに呼ぶ（作りながら返せる頭脳だけ。呼ばれなかった文は、返り値を話す）。
+        """
         if not self.vision:
             if wants_look(text):
                 text += "（いまは カメラが つかえないので、見えていません）"
             image_jpeg = None
         self.last_face = None
+        self.streamed = False   # on_sentence で返事を全部わたしたか
         try:
-            emotion, answer = self._ask(text, image_jpeg)
+            if on_sentence is not None:
+                emotion, answer = self._ask(text, image_jpeg, on_sentence)
+            else:
+                emotion, answer = self._ask(text, image_jpeg)
         except BrainError as e:
             if e.offline and self.fallback:
                 return self.fallback.reply(text)
             return e.emotion, e.answer
-        spec, answer = expression.parse(answer)
+        if isinstance(answer, SentenceStream):   # 作りながら返した: 話した文がそのまま返事
+            stream = answer
+            spec, answer = stream.spec, stream.text
+            self.streamed = bool(stream.sentences)
+        else:
+            spec, answer = expression.parse(answer)
+            answer = shorten(clean_for_speech(answer))
         self.last_face = spec if self.face_parts else None
-        answer = shorten(clean_for_speech(answer))
         if not answer:
             emotion, answer = "surprise", "えっと、もういっかい いって？"
         # 履歴は文字だけ残す（画像は毎回送り直さない）
         note = "（カメラの画像つき）" if image_jpeg else ""
         self.history += [{"role": "user", "content": text + note},
-                         {"role": "assistant", "content": f"[{emotion}] "
-                          + (expression.to_text(self.last_face) + " " if self.last_face else "")
-                          + answer}]
+                         {"role": "assistant", "content": f"[{emotion}] " + answer
+                          + (" " + expression.to_text(self.last_face) if self.last_face else "")}]
         self.history = self.history[-2 * self.max_turns:]
         return emotion, answer
 
@@ -224,7 +352,7 @@ class _BrainBase:
         base = self.system + ("\n" + expression.PROMPT_HINT if self.face_parts else "")
         return base + ("\n" + extra if extra else "")
 
-    def _ask(self, text, image_jpeg):
+    def _ask(self, text, image_jpeg, on_sentence=None):
         raise NotImplementedError
 
 
@@ -240,7 +368,7 @@ class ClaudeBrain(_BrainBase):
         self.client = client
         self.model, self.effort = model, effort
 
-    def _ask(self, text, image_jpeg):
+    def _ask(self, text, image_jpeg, on_sentence=None):
         import anthropic
         content = []
         if image_jpeg:
@@ -292,6 +420,7 @@ class OllamaBrain(_BrainBase):
     def _probe(self):
         try:
             info = self._post("/api/show", {"model": self.model}, 5)
+            self.warm_up()
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 raise RuntimeError(f"Ollama にモデル {self.model} がありません"
@@ -311,6 +440,7 @@ class OllamaBrain(_BrainBase):
     def summarize(self, prompt):
         """記憶のまとめ用。会話の履歴は使わず、1回だけ聞く。家の中の Ollama にだけ送る。"""
         body = {"model": self.model, "stream": False, "options": {"temperature": 0.2},
+                "keep_alive": KEEP_ALIVE,   # 書かないと 5分 に戻り、モデルがメモリから外れる
                 "messages": [{"role": "user", "content": prompt}]}
         if self._caps and "thinking" in self._caps:
             body["think"] = False
@@ -331,7 +461,7 @@ class OllamaBrain(_BrainBase):
         except OSError:
             return False
 
-    def _ask(self, text, image_jpeg):
+    def _ask(self, text, image_jpeg, on_sentence=None):
         if not self._alive():
             print(f"[会話] Ollama ({self.url}) につながりません")
             raise BrainError("sad", "ごめんね、かんがえる コンピューターに つながらないみたい。",
@@ -344,27 +474,90 @@ class OllamaBrain(_BrainBase):
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": self.system_prompt()}] + self.history + [user],
-            "stream": False,
-            "keep_alive": "30m",  # モデルを読みこんだままにして、次の返事を速くする
+            # 少しずつ受けとり、1文できたらすぐ話す（全部できるのを待たない）
+            "stream": True,
+            "keep_alive": KEEP_ALIVE,
             # 短い会話なので記憶する長さ(num_ctx)を絞ってメモリを節約する
             "options": {"num_predict": 200, "temperature": 0.7, "num_ctx": 4096},
         }
         if self._caps and "thinking" in self._caps:
             body["think"] = False  # 子どもとの会話では考えこまず、すぐ答える
+        stream = SentenceStream(face_parts=self.face_parts)
+        req = urllib.request.Request(self.url + "/api/chat", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+
+        sent_face = [False]
+
+        def give(sentences):
+            calls = [(stream.emotion, stream.spec, s) for s in sentences]
+            if stream.spec is not None and not sent_face[0] and stream.sentences and not sentences:
+                calls.append((stream.emotion, stream.spec, None))   # 話しはじめたあとに届いた顔
+            for emotion, spec, sentence in calls:
+                if spec is not None:
+                    sent_face[0] = True
+                if on_sentence:
+                    try:
+                        on_sentence(emotion, spec, sentence)
+                    except Exception as e:  # 話す側の失敗で、返事づくりを止めない
+                        print(f"[会話] 文を話せませんでした（{e}）")
+
+        t0 = time.monotonic()
+        t_first = None
         try:
-            resp = self._post("/api/chat", body, self.timeout)
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                for line in r:   # 1行に1つの JSON（"done": true で終わり）
+                    if not line.strip():
+                        continue
+                    part = json.loads(line.decode("utf-8"))
+                    if part.get("error"):
+                        raise BrainError("sad", "ごめんね、うまく かんがえられなかった。")
+                    if t_first is None:
+                        t_first = time.monotonic() - t0
+                    give(stream.feed(part.get("message", {}).get("content", "")))
+                    if part.get("done"):
+                        self._log_stats(part, t_first)
+                    if stream.finished or part.get("done"):
+                        break   # 話す文と顔がそろったら、つづきは作らせない（接続を閉じると止まる）
+            give(stream.finish())
+            if stream.finished and t_first is not None:
+                print(f"[時間] Ollama: 最初の文字まで {t_first:.1f}秒 / ぜんぶで {time.monotonic() - t0:.1f}秒"
+                      f"（{len(stream.raw)}文字で打ち切り）")
         except urllib.error.HTTPError as e:
             print(f"[会話] Ollama エラー {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}")
             raise BrainError("sad", "ごめんね、うまく かんがえられなかった。")
-        except OSError as e:  # つながらない・時間切れ
+        except (OSError, ValueError) as e:  # つながらない・時間切れ・途中で切れた
+            if stream.sentences:   # もう話しはじめていれば、そこまでを返事にする
+                print(f"[会話] Ollama の返事が途中で切れました（{e}）")
+                return stream.emotion, stream
             print(f"[会話] Ollama ({self.url}) につながりません（{e}）")
             raise BrainError("sad", "ごめんね、かんがえる コンピューターに つながらないみたい。",
                              offline=True)
-        emotion, answer = parse_reply(_THINK_RE.sub("", resp.get("message", {}).get("content", "")))
-        if is_unsafe(answer):
-            print(f"[会話] 安全のため言いかえました: {answer}")
+        if stream.unsafe and not stream.sentences:
+            print(f"[会話] 安全のため言いかえました: {stream.raw}")
             return SAFE_REPLY
-        return emotion, answer
+        if stream.unsafe:
+            print(f"[会話] 安全のため、とちゅうで止めました: {stream.raw}")
+        if not stream.sentences:
+            return stream.emotion, ""
+        return stream.emotion, stream
+
+    @staticmethod
+    def _log_stats(part, t_first):
+        """Ollama のくわしい時間（どこが遅いかを見る用）。"""
+        ns = 1e9
+        print(f"[時間] Ollama: 最初の文字まで {t_first or 0:.1f}秒"
+              f" / 読みこみ {part.get('load_duration', 0) / ns:.1f}秒"
+              f" / 指示 {part.get('prompt_eval_count', 0)}トークン {part.get('prompt_eval_duration', 0) / ns:.1f}秒"
+              f" / 作る {part.get('eval_count', 0)}トークン {part.get('eval_duration', 0) / ns:.1f}秒")
+
+    def warm_up(self):
+        """モデルを Mac のメモリに読みこんでおく（読みこみに4秒ほどかかるので、話しかけられる前に）。"""
+        def run():
+            try:
+                self._post("/api/generate", {"model": self.model, "keep_alive": KEEP_ALIVE}, 60)
+            except OSError:
+                pass
+        threading.Thread(target=run, daemon=True).start()
 
 
 class SimpleBrain:
@@ -482,7 +675,10 @@ class Voice:
         return np.clip(rms / (np.percentile(rms, 95) + 1e-6), 0, 1)
 
     def speak(self, text):
-        data, rate = self.synth(text)
+        self.play_audio(*self.synth(text))
+
+    def play_audio(self, data, rate):
+        """synth() で作った音を再生し、終わるまで待つ。"""
         self._env = self.envelope(data, rate, self._fps)
         self._start = time.monotonic()
         try:
@@ -982,6 +1178,14 @@ class Ears:
 
 
 # ---------------------------------------------------------------- まとめ役
+def _takes(fn, name):
+    import inspect
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 class Conversation:
     """聞いて・考えて・話す。顔への指示は events に積み、表示側が毎フレーム取り出す。"""
 
@@ -1130,27 +1334,103 @@ class Conversation:
         if self.get_image and wants_look(text) and self.brain.vision:
             image = self.get_image()
         t_ask = time.monotonic()
-        emotion, answer = self.brain.reply(self._with_speaker(text), image)
-        print(f"[{emotion}] {answer}")
-        self._log_timing(t_ask)
+        emotion, answer, params = self._think_and_speak(self._with_speaker(text), image, t_ask)
         if self.memory:
             self.memory.add_turn(text, answer)
         if self.language:
             self.language.on_turn(text, answer)
-        params = expression.compose(getattr(self.brain, "last_face", None))
-        if params:  # AI が組み立てた、その場の顔
-            print(f"[顔の部品] {expression.to_text(self.brain.last_face)}")
-            self.events.put(("compose", (emotion, params)))
-        self.events.put((emotion, 60))
-        sign = yes_no(answer)
-        if sign:  # はい・いいえは顔でもはっきり見せる（うなずく・首をふる、〇・×）
-            self.events.put(("sign", sign))
-        self._speak(answer)
         if params:
             self.events.put(("uncompose", 1.5))
         self.events.put((emotion, 1.5))
         self.last_reply = time.monotonic()
         return emotion, answer
+
+    def _show_reply(self, emotion, spec, answer):
+        """返事の顔を出す。AI が組み立てた顔の部品があれば、その顔の指定を返す。"""
+        params = expression.compose(spec)
+        if params:  # AI が組み立てた、その場の顔
+            print(f"[顔の部品] {expression.to_text(spec)}")
+            self.events.put(("compose", (emotion, params)))
+        self.events.put((emotion, 60))
+        sign = yes_no(answer)
+        if sign:  # はい・いいえは顔でもはっきり見せる（うなずく・首をふる、〇・×）
+            self.events.put(("sign", sign))
+        return params
+
+    def _think_and_speak(self, text, image, t_ask):
+        """考えながら話す: AI が1文作るたびに声にして、前の文を話しているあいだに次を作る。
+
+        前は返事を全部作り終え、全部を声にしてから話していた。いまは1文目ができたらすぐ話す。
+        作りながら返せない頭脳（Claude・簡単会話）は、今までどおり全部できてから話す。
+        """
+        clips = queue.Queue()   # (感情, 顔の部品, 文, 声) / None = おわり
+        result = {}
+
+        def on_sentence(emotion, spec, sentence):
+            if sentence is None:   # 顔の部品だけ（話しはじめたあとに届いた）
+                clips.put((emotion, spec, None, None))
+                return
+            audio = None
+            if self.voice:
+                try:
+                    audio = self.voice.synth(sentence.strip())
+                except Exception as e:
+                    print(f"[会話] 声にできませんでした（{e}）")
+            clips.put((emotion, spec, sentence.strip(), audio))
+
+        def work():
+            try:
+                if _takes(self.brain.reply, "on_sentence"):
+                    result["reply"] = self.brain.reply(text, image, on_sentence=on_sentence)
+                else:   # 作りながら返せない頭脳（簡単会話など）
+                    result["reply"] = self.brain.reply(text, image)
+            except Exception as e:
+                result["error"] = e
+            finally:
+                clips.put(None)
+
+        threading.Thread(target=work, daemon=True).start()
+        params, said, first = None, [], True
+        with self._speak_lock:
+            try:
+                while True:
+                    clip = clips.get()
+                    if clip is None:
+                        break
+                    emotion, spec, sentence, audio = clip
+                    if sentence is None:   # 話している途中で顔の部品が届いた: 顔を組み立てなおす
+                        if not first and params is None and self.brain_face_parts():
+                            params = expression.compose(spec)
+                            if params:
+                                print(f"[顔の部品] {expression.to_text(spec)}")
+                                self.events.put(("compose", (emotion, params)))
+                        continue
+                    if first:
+                        first = False
+                        self._log_timing(t_ask, first=True)
+                        params = self._show_reply(emotion, spec if self.brain_face_parts() else None,
+                                                  sentence)
+                        if self.ears and self.voice:
+                            self.ears.mute(True)
+                    said.append(sentence)
+                    self.events.put(("caption", " ".join(said)))
+                    if self.voice and audio is not None:
+                        self.voice.play_audio(*audio)
+            finally:
+                if not first and self.ears and self.voice:
+                    self.ears.mute(False)
+        if "error" in result:
+            raise result["error"]
+        emotion, answer = result["reply"]
+        print(f"[{emotion}] {answer}")
+        self._log_timing(t_ask)
+        if first:   # 作りながらは返ってこなかった: 今までどおり、全部を話す
+            params = self._show_reply(emotion, getattr(self.brain, "last_face", None), answer)
+            self._speak(answer)
+        return emotion, answer, params
+
+    def brain_face_parts(self):
+        return getattr(self.brain, "face_parts", True)
 
     def _family_names(self):
         if not self.faces:
@@ -1181,11 +1461,14 @@ class Conversation:
             self._answer("joy", "いま べつの えを かいてるところ。まっててね。")
         return True
 
-    def _log_timing(self, t_ask):
+    def _log_timing(self, t_ask, first=False):
         """どこで時間がかかっているかをログに出す（返事がおそいときの調べもの用）。"""
         tm = getattr(self.ears, "timing", None) or {}
         now = time.monotonic()
         if not tm.get("end") or now - tm["end"] > 120:
+            return
+        if first:
+            print(f"[時間] 1文目まで: 考える {now - t_ask:.1f}秒 / 話し終わりから声まで {now - tm['end']:.1f}秒")
             return
         print(f"[時間] おくれ {tm.get('lag', 0):.1f}秒 / 書き起こし {tm.get('stt', 0):.1f}秒"
               f" / 考える {now - t_ask:.1f}秒 / 話し終わりから返事まで {now - tm['end']:.1f}秒")
