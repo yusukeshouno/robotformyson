@@ -167,8 +167,10 @@ class SentenceStream:
         self.emotion, self.spec = "neutral", None
         self.head = False      # 感情タグと顔の部品を読みおえたか
         self.sentences = []    # もう返した文
-        self.done = False      # 決まりの長さに達した（もう作らなくてよい）
+        self.done = False      # 決まりの長さに達した（もう話さない）
         self.unsafe = False
+        self.spec_late = False  # 顔の部品が、話しはじめたあとに届いた
+        self.spec_after = False # 顔の部品が文のあとに書かれていた
 
     def _split_head(self, text, final):
         """(本文 または None（まだ待つ）)。"""
@@ -193,9 +195,9 @@ class SentenceStream:
 
     def feed(self, chunk, final=False):
         """新しく読み上げられるようになった文のリスト。"""
-        if self.done:
-            return []
         self.raw += chunk
+        if self.done and (self.spec is not None or not self.face_parts):
+            return []
         text = self.raw
         if "<think>" in text and not re.search(r"</think>", text) and not final:
             return []
@@ -204,12 +206,23 @@ class SentenceStream:
         if body is None:
             return []
         self.head = True
+        if self.face_parts and self.spec is None:   # 顔の部品は文のあと（最後）に来る
+            m = _SPEC_RE_ANY.search(body)
+            if m:
+                self.spec = expression.parse(m.group(0))[0]
+                self.spec_after = True               # 文のあとに書かれた: その前の文は言い終わっている
+                self.spec_late = bool(self.sentences)
+        if self.done:
+            return []
+        specs = list(_SPEC_RE_ANY.finditer(body))
+        spec_last = bool(specs) and not body[specs[-1].end():].strip()   # 本文が {…} で終わっている
         body = _TAG_RE.sub("", _SPEC_RE_ANY.sub("", body))
-        if not final and re.search(r"[{｛][^}｝]*$", body):
-            body = body[:re.search(r"[{｛][^}｝]*$", body).start()]   # 部品の指定の途中は待つ
+        tail = re.search(r"[{｛][^}｝]*$", body)
+        if tail:
+            body = body[:tail.start()]   # 部品の指定の途中（その前の文はもう言い終わっている）
         body = clean_for_speech(body)
         parts = _SENTENCE_RE.findall(body)
-        if not final:
+        if not final and not (tail or (self.spec_after and spec_last)):
             # 最後の文は、次の文字が来るまで待つ（文の途中か、「！？」と続くかもしれない）
             parts = parts[:-1]
         out = []
@@ -240,6 +253,14 @@ class SentenceStream:
     @property
     def text(self):
         return "".join(self.sentences).strip()
+
+    @property
+    def finished(self):
+        """もう受けとらなくてよいか（話す文がそろい、顔の部品も届いた）。"""
+        if not self.done:
+            return False
+        return (self.spec is not None or not self.face_parts or self.unsafe
+                or len(self.raw) > 400)
 
 
 # はい・いいえ。返事の始まりだけを見る（「いいよ」は はい、「いいえ」は いいえ）
@@ -321,9 +342,8 @@ class _BrainBase:
         # 履歴は文字だけ残す（画像は毎回送り直さない）
         note = "（カメラの画像つき）" if image_jpeg else ""
         self.history += [{"role": "user", "content": text + note},
-                         {"role": "assistant", "content": f"[{emotion}] "
-                          + (expression.to_text(self.last_face) + " " if self.last_face else "")
-                          + answer}]
+                         {"role": "assistant", "content": f"[{emotion}] " + answer
+                          + (" " + expression.to_text(self.last_face) if self.last_face else "")}]
         self.history = self.history[-2 * self.max_turns:]
         return emotion, answer
 
@@ -466,11 +486,18 @@ class OllamaBrain(_BrainBase):
         req = urllib.request.Request(self.url + "/api/chat", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
 
+        sent_face = [False]
+
         def give(sentences):
-            for sentence in sentences:
+            calls = [(stream.emotion, stream.spec, s) for s in sentences]
+            if stream.spec is not None and not sent_face[0] and stream.sentences and not sentences:
+                calls.append((stream.emotion, stream.spec, None))   # 話しはじめたあとに届いた顔
+            for emotion, spec, sentence in calls:
+                if spec is not None:
+                    sent_face[0] = True
                 if on_sentence:
                     try:
-                        on_sentence(stream.emotion, stream.spec, sentence)
+                        on_sentence(emotion, spec, sentence)
                     except Exception as e:  # 話す側の失敗で、返事づくりを止めない
                         print(f"[会話] 文を話せませんでした（{e}）")
 
@@ -489,10 +516,10 @@ class OllamaBrain(_BrainBase):
                     give(stream.feed(part.get("message", {}).get("content", "")))
                     if part.get("done"):
                         self._log_stats(part, t_first)
-                    if stream.done or part.get("done"):
-                        break   # 決まりの長さに達したら、つづきは作らせない（接続を閉じると止まる）
+                    if stream.finished or part.get("done"):
+                        break   # 話す文と顔がそろったら、つづきは作らせない（接続を閉じると止まる）
             give(stream.finish())
-            if stream.done and t_first is not None:
+            if stream.finished and t_first is not None:
                 print(f"[時間] Ollama: 最初の文字まで {t_first:.1f}秒 / ぜんぶで {time.monotonic() - t0:.1f}秒"
                       f"（{len(stream.raw)}文字で打ち切り）")
         except urllib.error.HTTPError as e:
@@ -1335,6 +1362,9 @@ class Conversation:
         result = {}
 
         def on_sentence(emotion, spec, sentence):
+            if sentence is None:   # 顔の部品だけ（話しはじめたあとに届いた）
+                clips.put((emotion, spec, None, None))
+                return
             audio = None
             if self.voice:
                 try:
@@ -1363,6 +1393,13 @@ class Conversation:
                     if clip is None:
                         break
                     emotion, spec, sentence, audio = clip
+                    if sentence is None:   # 話している途中で顔の部品が届いた: 顔を組み立てなおす
+                        if not first and params is None and self.brain_face_parts():
+                            params = expression.compose(spec)
+                            if params:
+                                print(f"[顔の部品] {expression.to_text(spec)}")
+                                self.events.put(("compose", (emotion, params)))
+                        continue
                     if first:
                         first = False
                         self._log_timing(t_ask, first=True)

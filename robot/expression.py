@@ -85,7 +85,7 @@ VALUE_ALIASES = {
 _SPEC_RE = re.compile(r"[{｛]([^{}｛｝]*)[}｝]")
 _PAIR_RE = re.compile(r"([^\s:：=＝,、，]+)\s*[:：=＝]\s*([^\s,、，]+)")
 
-PROMPT_HINT = """- 感情タグのすぐあとに、そのときの顔を部品で組み立ててください。決まった顔でなく、話の内容に合った顔を考えてください:
+PROMPT_HINT = """- 返事の文を言い終えたら、いちばん最後に、そのときの顔を部品で組み立ててください（文より先に書かないでください。先に話しはじめるためです）。決まった顔でなく、話の内容に合った顔を考えてください:
   {目:? 口:? 眉:? ほっぺ:0〜2 色:? 動き:? 小物:?}
   目: normal big small happy smile heart star squeeze spiral wink sleepy angry sad uneven closed
   口: smile grin laugh o small_o flat frown wavy pout open
@@ -93,8 +93,8 @@ PROMPT_HINT = """- 感情タグのすぐあとに、そのときの顔を部品�
   色: blue cyan sky pink yellow orange green purple red white
   動き: none bounce jump shake droop sway tilt giggle fidget breathe
   小物: none hearts sparkle tear question exclaim zzz note sweat orbit
-  例: [excited] {目:star 口:laugh 眉:up ほっぺ:1 色:yellow 動き:bounce 小物:sparkle} すごい！ きょうりゅう だいすき！
-  例: [confused] {目:uneven 口:pout 眉:uneven ほっぺ:0 色:purple 動き:tilt 小物:sweat} あれれ、どっちかな？"""
+  例: [excited] すごい！ きょうりゅう だいすき！ {目:star 口:laugh 眉:up ほっぺ:1 色:yellow 動き:bounce 小物:sparkle}
+  例: [confused] あれれ、どっちかな？ {目:uneven 口:pout 眉:uneven ほっぺ:0 色:purple 動き:tilt 小物:sweat}"""
 
 
 def parse(text):

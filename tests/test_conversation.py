@@ -568,3 +568,28 @@ def test_capture_with_external_recorder():
                 break
             _t.sleep(0.05)
     assert sum(got) == 32000 and max(got) == 3200
+
+
+def test_sentence_stream_face_parts_after_sentences():
+    st = cv.SentenceStream()
+    got = []
+    for ch in ["[joy] ", "やあ！", " あそぼう。", " {目:happy", " 口:smile}"]:
+        got += st.feed(ch)
+    assert [g.strip() for g in got] == ["やあ！", "あそぼう。"]
+    assert st.done and st.spec == {"eyes": "happy", "mouth": "smile"} and st.spec_late
+    assert st.finished
+
+
+def test_ollama_late_face_parts_reach_conversation(monkeypatch):
+    monkeypatch.setattr(cv.time, "sleep", lambda s: None)
+    srv = FakeOllama(reply="[joy] うん！ いいよ。 {目:star 口:laugh}")
+    try:
+        brain = cv.make_brain("ollama", "m", ollama_url=srv.url)
+        voice, ears = ClipVoice(), FakeEars()
+        conv = cv.Conversation(brain, voice, ears)
+        assert conv.handle("あそぼう") == ("joy", "うん！ いいよ。")
+        assert voice.said == ["うん！", "いいよ。"]
+        assert "compose" in [e for e, _ in conv.poll()]
+        assert brain.history[-1]["content"].startswith("[joy] うん！ いいよ。 {")
+    finally:
+        srv.close()
